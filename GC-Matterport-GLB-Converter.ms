@@ -19,7 +19,7 @@ Script for proper conversion model to GLB=
 
 
 try(closeRolloutFloater floaterGCMatterportGLBConverter) catch()
-global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 500
+global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 560
 
 struct '@' (
 	currScript = getThisScriptFileName(),
@@ -68,30 +68,6 @@ fn GCMatterportIsLODReady layerNodes = (
 	return true
 )
 
-fn GCMatterportGetData = (
-	local lodLayerNames = #()
-	for layerIndex in 0 to (LayerManager.count - 1) do (
-		local sceneLayerName = (LayerManager.getLayer layerIndex).name
-		if ((findString (toLower sceneLayerName) "_lod") != undefined) do append lodLayerNames sceneLayerName
-	)
-	sort lodLayerNames
-	return for sceneLayerName in lodLayerNames collect (
-		local lodLayer = LayerManager.getLayerFromName sceneLayerName
-		local layerNodes = #()
-		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
-		local isLayerReady = GCMatterportIsLODReady layerNodes
-		local displayPrefix = ""
-		if (layerNodes.count > 1) then (
-			displayPrefix = "[ERROR: More than one object] "
-		) else if (isLayerReady) then (
-			displayPrefix = "[" + ((dotNetClass "System.Char").ConvertFromUtf32 10003) + "] "
-		) else if (layerNodes.count == 1) do (
-			displayPrefix = "[Only Object] "
-		)
-		GCMatterportLODEntry layerName: sceneLayerName displayText: (displayPrefix + sceneLayerName) objectCount: layerNodes.count isReady: isLayerReady
-	)
-)
-
 struct GCMatterportMaterialEntry (
 	layerName,
 	nodeRef,
@@ -127,6 +103,8 @@ struct GCMatterportAOOptions (
 	resolution = 1024,
 	sizeWorldUnits = 0.0
 )
+
+global GCMatterportRuntimeFolder = getFilenamePath (getThisScriptFileName())
 
 global GCMatterportSceneProperties = GCMatterportScenePropertyStore()
 
@@ -178,19 +156,373 @@ fn GCMatterportGetEffectiveAOOptions materialEntry = (
 )
 
 
+
+fn GCMatterportHasAOMap materialRef = (
+	if (materialRef == undefined or not isProperty materialRef #ambientOcclusionMap) do return false
+	local aoMap = materialRef.ambientOcclusionMap
+	if (materialRef.ambientOcclusion <= 0 or aoMap == undefined or classOf aoMap != Bitmaptexture) do return false
+	if (aoMap.coords.mapChannel != 2 or aoMap.filename == "") do return false
+	local resolvedFile = mapPaths.getFullFilePath aoMap.filename
+	return (resolvedFile != undefined and resolvedFile != "" and doesFileExist resolvedFile)
+)
+
+fn GCMatterportDenoiserPath = (
+	local programData = (dotNetClass "System.Environment").GetEnvironmentVariable "ProgramData"
+	local maxYear = ((maxVersion())[1] / 1000 + 1998) as integer
+	return (programData + "\\Autodesk\\ApplicationPlugins\\VRay3dsMax" + (maxYear as string) + "\\bin\\vdenoise.exe")
+)
+
+fn GCMatterportVerifyAOFile filePath resolution = (
+	if (not doesFileExist filePath) do throw ("AO output is missing: " + filePath)
+	local imageStream = (dotNetClass "System.IO.File").OpenRead filePath
+	local firstByte = imageStream.ReadByte()
+	local secondByte = imageStream.ReadByte()
+	imageStream.Dispose()
+	if (firstByte != 255 or secondByte != 216) do throw "AO output is not a valid JPEG image."
+	local outputBitmap = openBitmap filePath
+	if (outputBitmap == undefined) do throw ("Could not read AO output: " + filePath)
+	local validSize = (outputBitmap.width == resolution and outputBitmap.height == resolution)
+	close outputBitmap
+	if (not validSize) do throw "AO output resolution does not match the requested resolution."
+	return true
+)
+
+
+fn GCMatterportRunAOProcess executablePath argumentsContent workingFolder operationLabel: "AO image processing" = (
+	local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+	startInfo.FileName = executablePath
+	startInfo.Arguments = argumentsContent
+	startInfo.WorkingDirectory = workingFolder
+	startInfo.UseShellExecute = false
+	startInfo.CreateNoWindow = true
+	startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
+	local workerProcess = undefined
+	local failureReason = undefined
+	try (
+		workerProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
+		while (not workerProcess.WaitForExit 100) do (
+			windows.processPostedMessages()
+			if (keyboard.escPressed) do throw (operationLabel + " cancelled.")
+		)
+		if (workerProcess.ExitCode != 0) do throw (operationLabel + " exited with code " + (workerProcess.ExitCode as string) + ".")
+	) catch (failureReason = getCurrentException() as string)
+	if (workerProcess != undefined) do (
+		if (not workerProcess.HasExited) do (
+			-- The original BAT launches a child EXE; stop that process tree on cancellation.
+			local stopInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+			stopInfo.FileName = (dotNetClass "System.Environment").SystemDirectory + "\\taskkill.exe"
+			stopInfo.Arguments = "/PID " + (workerProcess.Id as string) + " /T /F"
+			stopInfo.UseShellExecute = false
+			stopInfo.CreateNoWindow = true
+			stopInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
+			local stopProcess = (dotNetClass "System.Diagnostics.Process").Start stopInfo
+			stopProcess.WaitForExit()
+			local stopExitCode = stopProcess.ExitCode
+			stopProcess.Dispose()
+			if (stopExitCode != 0 and not workerProcess.HasExited) do failureReason = "Could not stop " + operationLabel + "."
+		)
+		workerProcess.Dispose()
+	)
+	if (failureReason != undefined) do throw failureReason
+	return true
+)
+
+fn GCMatterportDenoiseAO filePath executablePath = (
+	local batchPath = GCMatterportRuntimeFolder + "denoise.bat"
+	local configPath = GCMatterportRuntimeFolder + "vdenoise.xml"
+	if (not doesFileExist executablePath or not doesFileExist batchPath or not doesFileExist configPath) do throw "V-Ray Denoiser, denoise.bat and vdenoise.xml are required."
+	-- Use the original GC Tools BAT and XML unchanged, including its year;image contract.
+	for forbiddenPart in #("%", ";", "\r", "\n") do (
+		if (findString filePath forbiddenPart != undefined or findString batchPath forbiddenPart != undefined) do throw "The original denoise.bat cannot process paths containing %, semicolons or line breaks. Save the scene in a compatible folder."
+	)
+	local maxYear = ((maxVersion())[1] / 1000 + 1998) as integer
+	local commandLine = "/d /v:off /s /c \"\"" + batchPath + "\" \"" + (maxYear as string) + ";" + filePath + "\"\""
+	local commandExecutable = (dotNetClass "System.Environment").SystemDirectory + "\\cmd.exe"
+	GCMatterportRunAOProcess commandExecutable commandLine GCMatterportRuntimeFolder
+	local denoisedFiles = getFiles ((getFilenamePath filePath) + (getFilenameFile filePath) + "_denoised*" + (getFilenameType filePath))
+	if (denoisedFiles.count != 1) do throw "V-Ray Denoiser did not produce exactly one denoised AO image."
+	return denoisedFiles[1]
+)
+
+fn GCMatterportOptimizeAO filePath = (
+	local optimizerPath = GCMatterportRuntimeFolder + "jpegoptim.exe"
+	if (not doesFileExist optimizerPath) do throw "jpegoptim.exe is required beside the converter script."
+	-- Same quality and switches as GC Tools.optimizeImages, applied after optional denoising.
+	local argumentsContent = "--strip-all --all-progressive -f -o -q -m90 \"" + filePath + "\""
+	GCMatterportRunAOProcess optimizerPath argumentsContent (getFilenamePath filePath)
+	return true
+)
+
+-- Read only the chosen ID's faces. Channel support alone does not prove usable UVs.
+fn GCMatterportValidateAOBakeMesh sourceMesh materialID = (
+	local selectedFaces = for faceIndex in 1 to sourceMesh.numfaces where (getFaceMatID sourceMesh faceIndex == materialID) collect faceIndex
+	if (selectedFaces.count == 0) do return ("No faces are assigned to Material ID " + (materialID as string) + ". Select a material ID used by this object, or assign this ID to the intended faces.")
+	local uvInstruction = "Cannot bake AO for this ID: UV channel 2 is missing or unusable on its faces. Select this ID and run Transfer UV Channel from 1 -> 2."
+	if (not meshop.getMapSupport sourceMesh 2) do return uvInstruction
+	local mapVertexCount = meshop.getNumMapVerts sourceMesh 2
+	if (mapVertexCount < 3) do return uvInstruction
+	try (
+		for faceIndex in selectedFaces do (
+			local mapFace = meshop.getMapFace sourceMesh 2 faceIndex
+			local uvCorners = #()
+			for cornerIndex in 1 to 3 do (
+				local mapIndex = mapFace[cornerIndex] as integer
+				if (mapIndex < 1 or mapIndex > mapVertexCount) do return uvInstruction
+				local uvPoint = meshop.getMapVert sourceMesh 2 mapIndex
+				-- Positive bounds tests also reject non-finite UV values.
+				if (not (uvPoint.x >= -0.0001 and uvPoint.y >= -0.0001 and uvPoint.x <= 1.0001 and uvPoint.y <= 1.0001)) do return ("Cannot bake AO for this ID: its UV channel 2 coordinates are outside 0..1 or invalid. Run Transfer UV Channel from 1 -> 2 for this ID.")
+				append uvCorners uvPoint
+			)
+			local edgeA = uvCorners[2] - uvCorners[1]
+			local edgeB = uvCorners[3] - uvCorners[1]
+			local uvAreaTwice = abs (edgeA.x * edgeB.y - edgeA.y * edgeB.x)
+			if (uvAreaTwice <= 1e-12) do return ("Cannot bake AO for this ID: UV channel 2 contains collapsed faces with no usable UV area. Run Transfer UV Channel from 1 -> 2 for this ID.")
+		)
+	) catch (
+		return uvInstruction
+	)
+	return undefined
+)
+
+fn GCMatterportAOPreflight materialEntry = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do return "The material assignment changed. Refresh the list and select the ID again."
+	local sourceMesh = undefined
+	local validationMessage = undefined
+	try (
+		sourceMesh = snapshotAsMesh materialEntry.nodeRef
+		validationMessage = GCMatterportValidateAOBakeMesh sourceMesh materialEntry.materialID
+	) catch (
+		validationMessage = "Cannot inspect this object's geometry for AO baking. Check that the object evaluates to a mesh."
+	)
+	if (sourceMesh != undefined) do delete sourceMesh
+	return validationMessage
+)
+
+
+fn GCMatterportFileKey stringContent = (
+	local hasher = (dotNetClass "System.Security.Cryptography.SHA256").Create()
+	local inputBytes = (dotNetClass "System.Text.Encoding").UTF8.GetBytes stringContent
+	local hashBytes = hasher.ComputeHash inputBytes
+	hasher.Dispose()
+	return toLower (substituteString ((dotNetClass "System.BitConverter").ToString hashBytes) "-" "")
+)
+
+fn GCMatterportPublishAO completedFilePath outputFolder materialEntry = (
+	local safeLayerName = trimRight materialEntry.layerName " ."
+	for invalidCharacter in #("\\", "/", ":", "*", "?", "\"", "<", ">", "|") do safeLayerName = substituteString safeLayerName invalidCharacter "_"
+	if (safeLayerName != materialEntry.layerName) do safeLayerName += "_" + (substring (GCMatterportFileKey materialEntry.layerName) 1 16)
+	local fileStem = safeLayerName + "_ID" + (materialEntry.materialID as string) + "_AO"
+	local finalFilePath = outputFolder + fileStem + ".jpg"
+	local publicationError = undefined
+	try (
+		if (doesFileExist finalFilePath) then (
+			(dotNetClass "System.IO.File").Replace completedFilePath finalFilePath ((getFilenamePath completedFilePath) + "previous_AO.jpg")
+		) else (
+			(dotNetClass "System.IO.File").Move completedFilePath finalFilePath
+		)
+	) catch (
+		-- Only a publication failure may choose a new filename; processing failures never reach here.
+		local publicationReason = getCurrentException() as string
+		local dateSuffix = (dotNetClass "System.DateTime").Now.ToString "yyyyMMdd_HHmmss_fff"
+		finalFilePath = outputFolder + fileStem + "_" + dateSuffix + ".jpg"
+		if (doesFileExist finalFilePath) do finalFilePath = outputFolder + fileStem + "_" + dateSuffix + "_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + ".jpg"
+		try (
+			(dotNetClass "System.IO.File").Move completedFilePath finalFilePath
+			format "AO saved with a timestamp because the stable output could not be replaced: %\n" publicationReason
+		) catch (
+			publicationError = "Cannot publish either the stable AO file or its timestamp fallback. The previous AO map is preserved. " + (getCurrentException() as string)
+		)
+	)
+	if (publicationError != undefined) do throw publicationError
+	return finalFilePath
+)
+
+struct GCMatterportAOBakeResult (filePath, errorMessage, cancelled = false)
+
+fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
+	local bakeResult = GCMatterportAOBakeResult()
+	bakeResult.errorMessage = GCMatterportAOPreflight materialEntry
+	if (bakeResult.errorMessage != undefined) do return bakeResult
+	local originalRenderer = renderers.current
+	local originalSelection = selection as array
+	local originalPanelMode = getCommandPanelTaskMode()
+	local originalStackObject = modPanel.getCurrentObject()
+	local originalSubObjectLevel = subObjectLevel
+	local originalRenderStates = for sceneNode in objects collect #(sceneNode, sceneNode.renderable, sceneNode.renderByLayer)
+	local temporaryNode = undefined
+	local occluderNode = undefined
+	local renderBitmap = undefined
+	local wasCancelled = false
+	local rawFilePath = ""
+	local runFolder = undefined
+	local runToken = undefined
+	try (
+		if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The material assignment changed. Refresh the list."
+		if (Corona == undefined or CoronaAO == undefined or CoronaPhysicalMtl == undefined or Corona_DiffuseColor == undefined) do throw "Corona renderer, AO map, physical material and DiffuseColor bake element are required."
+		if (aoOptions.useVRayDenoiser and not doesFileExist denoiserPath) do throw ("V-Ray Denoiser was not found: " + denoiserPath)
+		if (not doesFileExist (GCMatterportRuntimeFolder + "jpegoptim.exe")) do throw "jpegoptim.exe is required beside the converter script before AO can be rendered."
+		if (aoOptions.useVRayDenoiser and (not doesFileExist (GCMatterportRuntimeFolder + "denoise.bat") or not doesFileExist (GCMatterportRuntimeFolder + "vdenoise.xml"))) do throw "The original denoise.bat and vdenoise.xml are required beside the converter script."
+		local safeLayerName = materialEntry.layerName
+		for invalidCharacter in #("\\", "/", ":", "*", "?", "\"", "<", ">", "|") do safeLayerName = substituteString safeLayerName invalidCharacter "_"
+		local fileStem = safeLayerName + "_node" + (materialEntry.nodeRef.inode.handle as string) + "_ID" + (materialEntry.materialID as string) + "_AO"
+		runToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
+		runFolder = outputFolder + "._ao_" + runToken + "\\"
+		if (not makeDir runFolder all: true) do throw "Could not create AO output folder."
+		rawFilePath = runFolder + fileStem + ".jpg"
+		-- Work on an evaluated copy. The original stack, UVs and bake properties stay intact.
+		subObjectLevel = 0
+		setCommandPanelTaskMode mode: #create
+		with undo off (
+			temporaryNode = copy materialEntry.nodeRef
+			temporaryNode.name = uniqueName "GC_AO_Bake_"
+			convertToMesh temporaryNode
+			local discardFaces = #{}
+			local bakeFaces = #{}
+			for faceIndex in 1 to temporaryNode.numfaces do (
+				if (getFaceMatID temporaryNode faceIndex != materialEntry.materialID) then discardFaces[faceIndex] = true else bakeFaces[faceIndex] = true
+			)
+			-- GC Tools shades against the complete object. Keep other IDs as occluders,
+			-- but never bake their UVs into the selected ID's image or duplicate its faces.
+			if (discardFaces.numberSet > 0) do (
+				occluderNode = copy temporaryNode
+				occluderNode.name = uniqueName "GC_AO_Occluder_"
+				meshop.deleteFaces occluderNode bakeFaces delIsoVerts: true
+				occluderNode.renderByLayer = false
+				occluderNode.renderable = true
+				occluderNode.INodeBakeProperties.removeAllBakeElements()
+				occluderNode.INodeBakeProperties.bakeEnabled = false
+			)
+			meshop.deleteFaces temporaryNode discardFaces delIsoVerts: true
+			for renderState in originalRenderStates do (
+				renderState[1].renderByLayer = false
+				renderState[1].renderable = false
+			)
+			temporaryNode.renderByLayer = false
+			temporaryNode.renderable = true
+			local aoMaterial = CoronaPhysicalMtl()
+			aoMaterial.baseColor = white
+			aoMaterial.baseRoughness = 1.0
+			local aoMap = CoronaAO()
+			aoMap.maxDistance = aoOptions.sizeWorldUnits
+			aoMap.colorSpread = 0.022
+			aoMap.quality = 64
+			aoMap.normalMode = 0
+			aoMap.rayDirectionality = 0.03
+			aoMaterial.baseTexmap = aoMap
+			temporaryNode.material = aoMaterial
+			if (isValidNode occluderNode) do occluderNode.material = aoMaterial
+			local bakeElement = Corona_DiffuseColor()
+			bakeElement.outputSzX = aoOptions.resolution
+			bakeElement.outputSzY = aoOptions.resolution
+			bakeElement.autoSzOn = false
+			bakeElement.fileType = "jpg"
+			bakeElement.filename = rawFilePath
+			bakeElement.enabled = true
+			bakeElement.filter = true
+			temporaryNode.INodeBakeProperties.removeAllBakeElements()
+			if (not temporaryNode.INodeBakeProperties.addBakeElement bakeElement) do throw "Could not add the Corona bake element."
+			temporaryNode.INodeBakeProperties.bakeEnabled = true
+			temporaryNode.INodeBakeProperties.bakeChannel = 2
+			temporaryNode.INodeBakeProperties.nDilations = 4
+			local bakeRenderer = Corona()
+			bakeRenderer.progressive_passLimit = aoOptions.passes
+			bakeRenderer.progressive_timeLimit = 0
+			bakeRenderer.adaptivity_targetError = 0
+			bakeRenderer.denoise_filterType = 0
+			bakeRenderer.denoise_blendAmount = 1.0
+			bakeRenderer.shading_onlyElements = true
+			renderers.current = bakeRenderer
+			select temporaryNode
+			renderBitmap = render rendertype: #bakeSelected frame: currentTime outputSize: [aoOptions.resolution, aoOptions.resolution] vfb: false progressBar: true renderhiddenobjects: true cancelled: &wasCancelled
+		)
+		if (wasCancelled or renderBitmap == undefined) do (
+			bakeResult.cancelled = true
+			throw "AO rendering cancelled or returned no image."
+		)
+		GCMatterportVerifyAOFile rawFilePath aoOptions.resolution
+		local completedFilePath = rawFilePath
+		if (aoOptions.useVRayDenoiser) do completedFilePath = GCMatterportDenoiseAO rawFilePath denoiserPath
+		GCMatterportVerifyAOFile completedFilePath aoOptions.resolution
+		GCMatterportOptimizeAO completedFilePath
+		GCMatterportVerifyAOFile completedFilePath aoOptions.resolution
+		bakeResult.filePath = GCMatterportPublishAO completedFilePath outputFolder materialEntry
+	) catch (
+		bakeResult.errorMessage = getCurrentException() as string
+		if (wasCancelled or keyboard.escPressed or findString bakeResult.errorMessage "cancelled" != undefined) do bakeResult.cancelled = true
+	)
+	-- Cleanup runs after success, render cancellation, denoiser failure and setup errors.
+	if (renderBitmap != undefined) do try (close renderBitmap) catch (format "AO bitmap cleanup: %\n" (getCurrentException()))
+	with undo off (
+		try (if (isValidNode occluderNode) do delete occluderNode) catch (bakeResult.errorMessage = "Temporary AO occluder cleanup failed: " + (getCurrentException() as string))
+		try (if (isValidNode temporaryNode) do delete temporaryNode) catch (bakeResult.errorMessage = "Temporary AO object cleanup failed: " + (getCurrentException() as string))
+		for renderState in originalRenderStates where (isValidNode renderState[1]) do (
+			try (
+				renderState[1].renderable = renderState[2]
+				renderState[1].renderByLayer = renderState[3]
+			) catch (bakeResult.errorMessage = "Could not restore object renderability: " + (getCurrentException() as string))
+		)
+		try (renderers.current = originalRenderer) catch (bakeResult.errorMessage = "Could not restore the original renderer: " + (getCurrentException() as string))
+		try (
+			select (for sceneNode in originalSelection where (isValidNode sceneNode) collect sceneNode)
+			setCommandPanelTaskMode mode: originalPanelMode
+			if (originalPanelMode == #modify and originalStackObject != undefined) do modPanel.setCurrentObject originalStackObject
+			subObjectLevel = originalSubObjectLevel
+		) catch (bakeResult.errorMessage = "Could not restore the original selection/panel: " + (getCurrentException() as string))
+	)
+	if (runFolder != undefined and doesDirectoryExist runFolder) do (
+		try (
+			local pathClass = dotNetClass "System.IO.Path"
+			local resolvedFolder = pathClass.GetFullPath runFolder
+			local expectedFolder = pathClass.GetFullPath (outputFolder + "._ao_" + runToken + "\\")
+			local resolvedRoot = pathClass.GetFullPath outputFolder
+			if (resolvedFolder != expectedFolder or not (dotNetObject "System.String" resolvedFolder).StartsWith resolvedRoot (dotNetClass "System.StringComparison").OrdinalIgnoreCase) do throw "Refusing cleanup outside this AO run's temporary folder."
+			(dotNetClass "System.IO.Directory").Delete resolvedFolder true
+		) catch (
+			-- A cleanup warning must not prevent assignment of a successfully published image.
+			format "AO temporary cleanup: %\n" (getCurrentException())
+		)
+	)
+	return bakeResult
+)
+
+fn GCMatterportAssignAO materialEntry filePath = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The target material changed during rendering. The AO image was kept without assigning it."
+	local parentMaterial = materialEntry.nodeRef.material
+	local replacementMaterial = copy materialEntry.materialRef
+	local aoMap = Bitmaptexture filename: filePath name: "AO"
+	reload aoMap.bitmap
+	aoMap.coords.mapChannel = 2
+	replacementMaterial.ambientOcclusionMap = aoMap
+	replacementMaterial.ambientOcclusion = 1.0
+	if (not GCMatterportHasAOMap replacementMaterial) do throw "The completed AO map could not be validated."
+	undo "Assign per-ID Matterport AO" on (
+		-- Preserve other slot references when isolating a shared parent MultiMaterial.
+		if ((refs.dependentNodes parentMaterial).count > 1) do (
+			local isolatedParent = copy parentMaterial
+			isolatedParent.materialList = for subMaterial in parentMaterial.materialList collect subMaterial
+			parentMaterial = isolatedParent
+		)
+		parentMaterial.materialList[materialEntry.slotIndex] = replacementMaterial
+		materialEntry.nodeRef.material = parentMaterial
+	)
+	materialEntry.materialRef = replacementMaterial
+	return true
+)
+
 fn GCMatterportFormatMaterialRow materialEntry = (
 	local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 	local propertyKey = GCMatterportAOKey materialEntry
 	local isEnabled = GCMatterportSceneProperties.getValue (propertyKey + "enabled") true
 	local statusGlyph = (dotNetClass "System.Char").ConvertFromUtf32 (if isEnabled then 10003 else 9675)
 	local rowText = "[" + statusGlyph + "] " + (materialEntry.materialID as string) + ": " + materialEntry.materialRef.name
+	if (GCMatterportHasAOMap materialEntry.materialRef) do rowText = "[AO] " + rowText
 	local differences = #()
 	if (aoOptions != undefined) do (
-		if (aoOptions.resolution != GCMatterportAutomaticAOResolution materialEntry.layerName) do append differences (aoOptions.resolution as string)
-		if (aoOptions.passes != 15) do append differences ("Passes " + (aoOptions.passes as string))
+		if (aoOptions.passes != 15) do append differences ((aoOptions.passes as string) + " passes")
+		if (aoOptions.resolution != GCMatterportAutomaticAOResolution materialEntry.layerName) do append differences ((aoOptions.resolution as string) + " px")
 		if (abs (aoOptions.sizeCM - 5.0) > 0.0001) do (
 			local sizeCaption = trimRight (trimRight (substituteString (formattedPrint aoOptions.sizeCM format: ".4f") "," ".") "0") "."
-			append differences ("Size " + sizeCaption + " cm")
+			append differences (sizeCaption + " cm")
 		)
 		if (not aoOptions.useVRayDenoiser) do append differences "No Denoise"
 	)
@@ -290,6 +622,65 @@ fn GCMatterportGetMaterials selectedLayerNames = (
 	return materialEntries
 )
 
+
+fn GCMatterportLODHasAO layerName = (
+	local materialEntries = GCMatterportGetMaterials #(layerName)
+	if (materialEntries.count == 0) do return false
+	if (materialEntries.count != materialEntries[1].nodeRef.material.materialList.count) do return false
+	local requiredCount = 0
+	local seenIDs = #()
+	for materialEntry in materialEntries do (
+		if (not GCMatterportIsCurrentMaterialEntry materialEntry or materialEntry.materialID < 1 or (findItem seenIDs materialEntry.materialID) != 0) do return false
+		append seenIDs materialEntry.materialID
+		local isEnabled = GCMatterportSceneProperties.getValue ((GCMatterportAOKey materialEntry) + "enabled") true
+		if (classOf isEnabled != BooleanClass) do return false
+		if (isEnabled) do (
+			requiredCount += 1
+			if (not GCMatterportHasAOMap materialEntry.materialRef) do return false
+		)
+	)
+	return (requiredCount > 0)
+)
+
+fn GCMatterportExportFileName layerName = (
+	local fileName = layerName
+	for invalidCharacter in #("\\", "/", ":", "*", "?", "\"", "<", ">", "|") do fileName = substituteString fileName invalidCharacter "_"
+	return (trimRight fileName " .") + ".glb"
+)
+
+fn GCMatterportLODHasGLB layerName = (
+	if (maxFilePath == "" or maxFileName == "") do return false
+	local filePath = maxFilePath + "export\\" + (GCMatterportExportFileName layerName)
+	-- Presence only; this does not assert that the file matches the latest scene edits.
+	return (doesFileExist filePath and getFileSize filePath > 0)
+)
+
+fn GCMatterportGetData = (
+	local lodLayerNames = #()
+	for layerIndex in 0 to (LayerManager.count - 1) do (
+		local sceneLayerName = (LayerManager.getLayer layerIndex).name
+		if ((findString (toLower sceneLayerName) "_lod") != undefined) do append lodLayerNames sceneLayerName
+	)
+	sort lodLayerNames
+	return for sceneLayerName in lodLayerNames collect (
+		local lodLayer = LayerManager.getLayerFromName sceneLayerName
+		local layerNodes = #()
+		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
+		local isLayerReady = GCMatterportIsLODReady layerNodes
+		local displayPrefix = ""
+		if (layerNodes.count > 1) then (
+			displayPrefix = "[ERROR: More than one object] "
+		) else if (isLayerReady) then (
+			displayPrefix = "[" + ((dotNetClass "System.Char").ConvertFromUtf32 10003) + "] "
+		) else if (layerNodes.count == 1) do (
+			displayPrefix = "[Only Object] "
+		)
+		local glbPrefix = if (GCMatterportLODHasGLB sceneLayerName) then "[GLB] " else ""
+		local aoPrefix = if (isLayerReady and GCMatterportLODHasAO sceneLayerName) then "[AO] " else ""
+		GCMatterportLODEntry layerName: sceneLayerName displayText: (glbPrefix + aoPrefix + displayPrefix + sceneLayerName) objectCount: layerNodes.count isReady: isLayerReady
+	)
+)
+
 fn GCMatterportLODsReady = (
 	local lodEntries = GCMatterportGetData()
 	if (lodEntries.count == 0) do return false
@@ -380,8 +771,457 @@ fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
 
 global _rExportGCMatterportGLBConverter
 
+
+rcmenu GCMatterportMaterialContextMenu (
+	submenu "Use Corona AO" (
+		menuItem aoEnable "Enable"
+		menuItem aoDisable "Disable"
+	)
+	submenu "Passes" (
+		menuItem passes1 "1"
+		menuItem passes5 "5"
+		menuItem passes15 "15"
+		menuItem passes30 "30"
+		menuItem passes60 "60"
+		menuItem passes100 "100"
+		menuItem passes150 "150"
+	)
+	submenu "Override Resolution" (
+		menuItem resolution512 "512"
+		menuItem resolution1024 "1024"
+		menuItem resolution2048 "2048"
+		menuItem resolution4096 "4096"
+	)
+	submenu "Size (cm)" (
+		menuItem size5 "5"
+		menuItem size15 "15"
+		menuItem size30 "30"
+		menuItem size60 "60"
+		menuItem size100 "100"
+	)
+	submenu "V-Ray Denoiser" (
+		menuItem denoiserEnable "Enable"
+		menuItem denoiserDisable "Disable"
+	)
+	on aoEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled true
+	on aoDisable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled false
+	on passes1 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 1
+	on passes5 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 5
+	on passes15 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 15
+	on passes30 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 30
+	on passes60 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 60
+	on passes100 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 100
+	on passes150 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 150
+	on resolution512 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 512
+	on resolution1024 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 1024
+	on resolution2048 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 2048
+	on resolution4096 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 4096
+	on size5 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 5.0
+	on size15 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 15.0
+	on size30 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 30.0
+	on size60 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 60.0
+	on size100 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 100.0
+	on denoiserEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #denoise true
+	on denoiserDisable picked do _rExportGCMatterportGLBConverter.batchAOSetting #denoise false
+)
+
+
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial)
+
+
+fn GCMatterportBuildExportMaterial sceneNode = (
+	local sourceParent = sceneNode.material
+	local exportParent = copy sourceParent
+	for slotIndex in 1 to sourceParent.materialList.count do (
+		local sourceMaterial = sourceParent.materialList[slotIndex]
+		local materialID = sourceParent.materialIDList[slotIndex]
+		local sourceEntry = GCMatterportMaterialEntry layerName: sceneNode.layer.name nodeRef: sceneNode materialRef: sourceMaterial slotIndex: slotIndex materialID: materialID
+		local aoEnabled = GCMatterportSceneProperties.getValue ((GCMatterportAOKey sourceEntry) + "enabled") true
+		-- Each slot gets its own instance, even when source slots share one material.
+		local exportMaterial = copy sourceMaterial
+		if (aoEnabled == false) do exportMaterial.ambientOcclusionMap = undefined
+		exportParent.materialList[slotIndex] = exportMaterial
+	)
+	return exportParent
+)
+
+fn GCMatterportExportPreflight layerNames = (
+	local exportJobs = #()
+	local issues = #()
+	if (maxFilePath == "" or maxFileName == "") do append issues "Save the MAX scene first. Output belongs in the scene's export folder."
+	if (GLTF_Export == undefined or (findItem exporterPlugin.classes GLTF_Export) == 0) do append issues "The native glTF exporter is unavailable. Install or enable the 3ds Max glTF exporter."
+	for fileName in #("gltfpack.exe", "gltfpack_webgl.bat") where (not doesFileExist (GCMatterportRuntimeFolder + fileName)) do append issues ("Missing runtime file: " + fileName + ". Restore it beside the converter script.")
+	for folderPath in #(maxFilePath, GCMatterportRuntimeFolder) do (
+		for forbiddenPart in #("%", ";", "\r", "\n") where (findString folderPath forbiddenPart != undefined) do append issues "The WebGL batch pipeline requires scene/script paths without %, semicolons or line breaks."
+	)
+	local referenceIDs = undefined
+	local referenceLayer = ""
+	local outputNames = #()
+	for layerName in layerNames do (
+		local lodLayer = LayerManager.getLayerFromName layerName
+		local layerNodes = #()
+		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
+		local limitPixels = GCMatterportAutomaticAOResolution layerName
+		if (limitPixels == undefined) do append issues (layerName + ": use a LOD0, LOD1, LOD2 or LOD3 suffix so the texture limit is known.")
+		local fileName = GCMatterportExportFileName layerName
+		if ((findItem outputNames (toLower fileName)) != 0) do append issues (layerName + ": its export filename conflicts with another selected LOD. Rename one layer.")
+		append outputNames (toLower fileName)
+		for forbiddenPart in #("%", ";", "\r", "\n") where (findString fileName forbiddenPart != undefined) do append issues (layerName + ": remove %, semicolons or line breaks from the layer name.")
+		if (layerNodes.count != 1) then (
+			append issues (layerName + ": expected exactly one object; found " + (layerNodes.count as string) + ". Move the intended object into this layer and remove extra objects.")
+		) else (
+			local sceneNode = layerNodes[1]
+			local entryCaption = layerName + " / " + sceneNode.name
+			local materialIDs = #()
+			local parentMaterial = sceneNode.material
+			local validSlots = true
+			local exportMaterial = undefined
+			if (parentMaterial == undefined or classOf parentMaterial != MultiMaterial) then (
+				validSlots = false
+				append issues (entryCaption + ": assign a Multi/Sub-Object material containing glTF materials.")
+			) else (
+				local slotCount = parentMaterial.materialList.count
+				if (slotCount == 0 or slotCount != parentMaterial.materialIDList.count) do (
+					validSlots = false
+					append issues (entryCaption + ": the Multi/Sub-Object material needs at least one slot and one actual Material ID per slot.")
+				)
+				for slotIndex in 1 to slotCount do (
+					local subMaterial = parentMaterial.materialList[slotIndex]
+					if (subMaterial == undefined or classOf subMaterial != glTFMaterial) do (
+						validSlots = false
+						append issues (entryCaption + " / slot " + (slotIndex as string) + ": assign a glTF material; empty, nested Multi and other material types cannot be exported.")
+					)
+					if (slotIndex <= parentMaterial.materialIDList.count) do (
+						local materialID = parentMaterial.materialIDList[slotIndex]
+						if (materialID < 1 or materialID > 65535 or (findItem materialIDs materialID) != 0) do (
+							validSlots = false
+							append issues (entryCaption + " / ID " + (materialID as string) + ": assign a unique Material ID between 1 and 65535.")
+						)
+						append materialIDs materialID
+					)
+				)
+				sort materialIDs
+				if (validSlots) do (
+					if (referenceIDs == undefined) then (
+						referenceIDs = materialIDs
+						referenceLayer = layerName
+					) else if ((materialIDs as string) != (referenceIDs as string)) do append issues (entryCaption + ": the slot count and actual Material ID set must match " + referenceLayer + " " + (referenceIDs as string) + "; found " + (materialIDs as string) + ". Match the selected LOD materials before exporting.")
+				)
+				if (validSlots) do (
+					exportMaterial = GCMatterportBuildExportMaterial sceneNode
+					-- Excluded AO maps are already absent, so missing excluded AO files do not block export.
+					for bitmapMap in (getClassInstances Bitmaptexture target: exportMaterial) do (
+						local texturePath = mapPaths.getFullFilePath bitmapMap.filename
+						if (texturePath == undefined or texturePath == "" or not doesFileExist texturePath) do append issues (entryCaption + ": missing exported texture '" + bitmapMap.filename + "'. Relink the image before exporting.")
+					)
+				)
+			)
+			local sourceMesh = undefined
+			try (
+				if (superClassOf sceneNode != GeometryClass) do throw "Not geometry"
+				sourceMesh = snapshotAsMesh sceneNode
+				if (sourceMesh.numfaces == 0) do throw "No mesh faces"
+				if (parentMaterial != undefined and classOf parentMaterial == MultiMaterial) do (
+					local missingIDs = #()
+					for faceIndex in 1 to sourceMesh.numfaces do (
+						local faceID = getFaceMatID sourceMesh faceIndex
+						if ((findItem materialIDs faceID) == 0) do appendIfUnique missingIDs faceID
+					)
+					if (missingIDs.count > 0) do append issues (entryCaption + ": faces use Material IDs without matching glTF slots " + (missingIDs as string) + ". Correct the face IDs or add matching glTF slots.")
+				)
+			) catch (
+				append issues (entryCaption + ": export requires geometry that evaluates to a non-empty mesh. Check the object and its modifiers.")
+			)
+			if (sourceMesh != undefined) do delete sourceMesh
+			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial)
+		)
+	)
+	return #(exportJobs, issues)
+)
+
+fn GCMatterportValidateGLB filePath = (
+	if (not doesFileExist filePath or getFileSize filePath <= 0) do throw "WebGL packing did not produce a non-empty GLB file."
+	return true
+)
+
+fn GCMatterportExportOneLOD exportJob exportFolder = (
+	local originalSelection = selection as array
+	local originalPanelMode = getCommandPanelTaskMode()
+	local originalStackObject = modPanel.getCurrentObject()
+	local originalSubObjectLevel = subObjectLevel
+	local temporaryNode = undefined
+	local temporaryLayer = undefined
+	local failureReason = undefined
+	local runToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
+	local stagingFolder = exportFolder + "._gclod_" + runToken + "\\"
+	local stagedGLB = stagingFolder + exportJob.fileName
+	local finalGLB = exportFolder + exportJob.fileName
+	try (
+		if (not isValidNode exportJob.nodeRef or exportJob.nodeRef.layer.name != exportJob.layerName) do throw "The LOD object changed. Refresh the list before exporting."
+		if (not makeDir stagingFolder all: true) do throw "Cannot create the export folder. Check folder permissions."
+		subObjectLevel = 0
+		setCommandPanelTaskMode mode: #create
+		with undo off (
+			temporaryLayer = LayerManager.newLayerFromName ("GC_Export_" + runToken)
+			if (temporaryLayer == undefined) do throw "Cannot create the temporary export layer."
+			temporaryNode = copy exportJob.nodeRef
+			local worldTransform = temporaryNode.transform
+			temporaryNode.parent = undefined
+			temporaryNode.transform = worldTransform
+			temporaryLayer.addNode temporaryNode
+			temporaryNode.isHidden = false
+			temporaryNode.isFrozen = false
+			convertToMesh temporaryNode
+			temporaryNode.material = exportJob.exportMaterial
+			-- All bitmap filenames point to owned copies before the native exporter is called.
+			local mapsFolder = stagingFolder + "maps\\"
+			makeDir mapsFolder all: true
+			local bitmapMaps = getClassInstances Bitmaptexture target: temporaryNode.material
+			for mapIndex in 1 to bitmapMaps.count do (
+				local bitmapMap = bitmapMaps[mapIndex]
+				local sourceImage = mapPaths.getFullFilePath bitmapMap.filename
+				local copiedImage = mapsFolder + (mapIndex as string) + (getFilenameType sourceImage)
+				if (not copyFile sourceImage copiedImage) do throw ("Cannot copy the referenced texture: " + sourceImage)
+				bitmapMap.filename = copiedImage
+			)
+			select temporaryNode
+			local intermediateGLTF = stagingFolder + "scene.gltf"
+			if (not exportFile intermediateGLTF #noPrompt selectedOnly: true using: GLTF_Export) do throw "Native glTF export failed or was cancelled."
+			if (not doesFileExist intermediateGLTF) do throw "Native glTF export produced no file."
+			local batchPath = GCMatterportRuntimeFolder + "gltfpack_webgl.bat"
+			local commandLine = "/d /v:off /s /c \"\"" + batchPath + "\" \"" + intermediateGLTF + ";" + stagedGLB + ";" + (exportJob.textureLimit as string) + "\"\""
+			local commandExecutable = (dotNetClass "System.Environment").SystemDirectory + "\\cmd.exe"
+			GCMatterportRunAOProcess commandExecutable commandLine GCMatterportRuntimeFolder operationLabel: "WebGL export"
+		)
+		GCMatterportValidateGLB stagedGLB
+		-- Publish only a validated GLB. A failed export never deletes an existing result.
+		if (doesFileExist finalGLB) then (
+			(dotNetClass "System.IO.File").Replace stagedGLB finalGLB (stagingFolder + "previous.glb")
+		) else (
+			(dotNetClass "System.IO.File").Move stagedGLB finalGLB
+		)
+	) catch (failureReason = getCurrentException() as string)
+	with undo off (
+		try (
+			if (isValidNode temporaryNode) do delete temporaryNode
+			if (temporaryLayer != undefined) do LayerManager.deleteLayerByName temporaryLayer.name
+		) catch (failureReason = "Could not remove temporary export geometry: " + (getCurrentException() as string))
+		try (
+			select (for sceneNode in originalSelection where (isValidNode sceneNode) collect sceneNode)
+			setCommandPanelTaskMode mode: originalPanelMode
+			if (originalPanelMode == #modify and originalStackObject != undefined) do modPanel.setCurrentObject originalStackObject
+			subObjectLevel = originalSubObjectLevel
+		) catch (failureReason = "Could not fully restore the original selection/panel: " + (getCurrentException() as string))
+	)
+	try (
+		local pathClass = dotNetClass "System.IO.Path"
+		local resolvedFolder = pathClass.GetFullPath stagingFolder
+		local expectedFolder = pathClass.GetFullPath (exportFolder + "._gclod_" + runToken + "\\")
+		local resolvedRoot = pathClass.GetFullPath exportFolder
+		if (resolvedFolder != expectedFolder or not (dotNetObject "System.String" resolvedFolder).StartsWith resolvedRoot (dotNetClass "System.StringComparison").OrdinalIgnoreCase) do throw "Refusing cleanup outside the owned export staging folder."
+		if (doesDirectoryExist resolvedFolder) do (dotNetClass "System.IO.Directory").Delete resolvedFolder true
+	) catch (
+		format "Export staging cleanup: %\n" (getCurrentException())
+	)
+	return failureReason
+)
+
+
+global GCMatterportPreviewProcess
+global GCMatterportPreviewPort
+global GCMatterportPreviewRoot
+global GCMatterportPreviewToken
+
+fn GCMatterportStopPreviewServer = (
+	if (GCMatterportPreviewProcess != undefined) do (
+		try (
+			if (not GCMatterportPreviewProcess.HasExited) do GCMatterportPreviewProcess.Kill()
+			GCMatterportPreviewProcess.Dispose()
+		) catch (format "Preview server cleanup: %\n" (getCurrentException()))
+	)
+	GCMatterportPreviewProcess = undefined
+	GCMatterportPreviewPort = undefined
+	return true
+)
+
+fn GCMatterportPreviewServerReady portNumber expectedToken = (
+	local response = undefined
+	local reader = undefined
+	local isReady = false
+	try (
+		local request = (dotNetClass "System.Net.WebRequest").Create ("http://127.0.0.1:" + (portNumber as string) + "/viewer-ready.txt")
+		request.Timeout = 300
+		request.ReadWriteTimeout = 300
+		request.Proxy = undefined
+		response = request.GetResponse()
+		reader = dotNetObject "System.IO.StreamReader" (response.GetResponseStream())
+		isReady = ((reader.ReadToEnd()) == expectedToken)
+	) catch (isReady = false)
+	if (reader != undefined) do reader.Dispose()
+	if (response != undefined) do response.Dispose()
+	return isReady
+)
+
+fn GCMatterportEnsurePreviewServer viewerFolder = (
+	if (GCMatterportPreviewProcess != undefined) do (
+		if (not GCMatterportPreviewProcess.HasExited and GCMatterportPreviewRoot == viewerFolder) do (
+			if (GCMatterportPreviewServerReady GCMatterportPreviewPort GCMatterportPreviewToken) do return GCMatterportPreviewPort
+		)
+		GCMatterportStopPreviewServer()
+	)
+	local serverExecutable = viewerFolder + "localhost.exe"
+	GCMatterportPreviewRoot = viewerFolder
+	GCMatterportPreviewToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
+	(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") GCMatterportPreviewToken
+	-- Choose a free port; retry if another process takes it between reservation and launch.
+	for attemptIndex in 1 to 3 do (
+		local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
+		listener.Start()
+		local localEndpoint = listener.LocalEndpoint
+		local portNumber = localEndpoint.Port
+		listener.Stop()
+		local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+		startInfo.FileName = serverExecutable
+		startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
+		startInfo.WorkingDirectory = viewerFolder
+		startInfo.UseShellExecute = false
+		startInfo.CreateNoWindow = true
+		startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
+		GCMatterportPreviewProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
+		for waitIndex in 1 to 15 while (not GCMatterportPreviewProcess.HasExited) do (
+			if (GCMatterportPreviewServerReady portNumber GCMatterportPreviewToken) do (
+				GCMatterportPreviewPort = portNumber
+				callbacks.removeScripts id: #GCMatterportPreviewShutdown
+				callbacks.addScript #preSystemShutdown "GCMatterportStopPreviewServer()" id: #GCMatterportPreviewShutdown
+				return portNumber
+			)
+			sleep 0.1
+		)
+		GCMatterportStopPreviewServer()
+	)
+	throw "The local Model Viewer server could not start. Check that localhost.exe is allowed to listen on the loopback interface."
+)
+
+
+fn GCMatterportViewerFiles = (
+	return #("index.html", "js\\engine.js", "js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm", "hdri\\studio.hdr", "localhost.exe", "mime.types", "favicon-16x16.png")
+)
+
+fn GCMatterportViewerIsInstalled viewerFolder = (
+	for relativeFile in GCMatterportViewerFiles() do (
+		local fileInfo = dotNetObject "System.IO.FileInfo" (viewerFolder + relativeFile)
+		if (not fileInfo.Exists or fileInfo.Length == 0) do return false
+	)
+	return true
+)
+
+fn GCMatterportInstallViewerArchive archivePath = (
+	local installRoot = GCMatterportRuntimeFolder + "model-viewer"
+	local stageRoot = GCMatterportRuntimeFolder + "._viewer_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N")
+	local backupRoot = stageRoot + "_previous"
+	local archive = undefined
+	local installFailure = undefined
+	local replacedOld = false
+	try (
+		dotNet.loadAssembly "System.IO.Compression"
+		dotNet.loadAssembly "System.IO.Compression.FileSystem"
+		makeDir stageRoot all:true
+		archive = (dotNetClass "System.IO.Compression.ZipFile").OpenRead archivePath
+		-- Extract only the known runtime paths; archive paths never determine destinations.
+		for relativeFile in GCMatterportViewerFiles() do (
+			local entry = archive.GetEntry (substituteString relativeFile "\\" "/")
+			if (entry == undefined or entry.Length == 0) do throw ("Viewer archive is missing: " + relativeFile)
+			local destination = stageRoot + "\\" + relativeFile
+			makeDir (getFilenamePath destination) all:true
+			(dotNetClass "System.IO.Compression.ZipFileExtensions").ExtractToFile entry destination false
+		)
+		archive.Dispose()
+		archive = undefined
+		if (not GCMatterportViewerIsInstalled (stageRoot + "\\")) do throw "The extracted viewer is incomplete."
+		GCMatterportStopPreviewServer()
+		if (doesDirectoryExist installRoot) do (
+			(dotNetClass "System.IO.Directory").Move installRoot backupRoot
+			replacedOld = true
+		)
+		(dotNetClass "System.IO.Directory").Move stageRoot installRoot
+	) catch (installFailure = getCurrentException() as string)
+	if (archive != undefined) do archive.Dispose()
+	if (installFailure != undefined and replacedOld and not doesDirectoryExist installRoot) do (
+		(dotNetClass "System.IO.Directory").Move backupRoot installRoot
+		replacedOld = false
+	)
+	-- These paths are generated for this invocation directly beneath the runtime root.
+	if (doesDirectoryExist stageRoot) do try ((dotNetClass "System.IO.Directory").Delete stageRoot true) catch (format "Viewer staging cleanup: %\n" (getCurrentException()))
+	if (installFailure == undefined and replacedOld) do try ((dotNetClass "System.IO.Directory").Delete backupRoot true) catch (format "Previous viewer cleanup: %\n" (getCurrentException()))
+	if (installFailure != undefined) do throw installFailure
+	return true
+)
+
+fn GCMatterportEnsureViewerInstalled = (
+	local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
+	if (GCMatterportViewerIsInstalled viewerFolder) do return true
+	local archivePath = GCMatterportRuntimeFolder + "model-viewer.zip"
+	if (not doesFileExist archivePath) do throw "model-viewer.zip is missing. Restore it beside the converter script."
+	return GCMatterportInstallViewerArchive archivePath
+)
+
+fn GCMatterportPreviewLOD layerName = (
+	if (not GCMatterportLODHasGLB layerName) do throw "Export this LOD to GLB before opening its preview."
+	GCMatterportEnsureViewerInstalled()
+	local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
+	for relativeFile in #("index.html", "js\\engine.js", "js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm", "hdri\\studio.hdr", "localhost.exe", "mime.types") do (
+		if (not doesFileExist (viewerFolder + relativeFile)) do throw ("Model Viewer runtime file is missing: " + relativeFile)
+	)
+	local sourceFile = maxFilePath + "export\\" + (GCMatterportExportFileName layerName)
+	local modelsFolder = viewerFolder + "models\\"
+	makeDir modelsFolder all: true
+	-- ASCII filenames avoid old TinyWeb filename encoding limits; the title remains Unicode.
+	local modelKey = GCMatterportFileKey ((dotNetClass "System.IO.Path").GetFullPath sourceFile)
+	local destinationFile = modelsFolder + modelKey + ".glb"
+	local stagedFile = modelsFolder + modelKey + ".tmp"
+	local backupFile = modelsFolder + modelKey + ".previous"
+	local previewFailure = undefined
+	try (
+		(dotNetClass "System.IO.File").Copy sourceFile stagedFile true
+		if (doesFileExist destinationFile) then (
+			(dotNetClass "System.IO.File").Replace stagedFile destinationFile backupFile
+			if (doesFileExist backupFile) do deleteFile backupFile
+		) else (
+			(dotNetClass "System.IO.File").Move stagedFile destinationFile
+		)
+		local portNumber = GCMatterportEnsurePreviewServer viewerFolder
+		local titleValue = (dotNetClass "System.Uri").EscapeDataString layerName
+		local cacheVersion = ((dotNetClass "System.DateTime").UtcNow.Ticks as string)
+		local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?model=" + modelKey + "&title=" + titleValue + "&v=" + cacheVersion
+		ShellLaunch previewURL ""
+	) catch (
+		previewFailure = getCurrentException() as string
+		if (doesFileExist stagedFile) do deleteFile stagedFile
+	)
+	if (previewFailure != undefined) do throw previewFailure
+	return true
+)
+
+struct GCMatterportAOClipboardEntry (
+	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution
+)
+global GCMatterportAOClipboard
+
 rcmenu GCMatterportLODContextMenu (
+	menuItem previewLODItem "Preview in Model Viewer"
+	separator previewSeparator
+	menuItem copyPropertiesItem "Copy Material Properties"
+	menuItem pastePropertiesItem "Paste Material Properties"
+	separator propertiesSeparator
 	menuItem deleteLODsItem "Delete LODs"
+	on GCMatterportLODContextMenu open do (
+		previewLODItem.enabled = _rExportGCMatterportGLBConverter.canPreviewLOD()
+		copyPropertiesItem.enabled = _rExportGCMatterportGLBConverter.canCopyLODProperties()
+		pastePropertiesItem.enabled = _rExportGCMatterportGLBConverter.canPasteLODProperties()
+	)
+	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
+	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
+	on pastePropertiesItem picked do _rExportGCMatterportGLBConverter.pasteLODProperties()
 	on deleteLODsItem picked do _rExportGCMatterportGLBConverter.deleteSelectedLODs()
 )
 
@@ -543,7 +1383,14 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		checkbox cbxAODenoise "V-Ray Denoiser" toolTip: "Use V-Ray Denoiser" width: 108 align: #left checked: true enabled: false
 	)
 
+	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
+
+	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
+
+	local isExportingLODs = false
+	local isRenderingAO = false
 	local refreshMaterials
+	local refreshLODs
 	local aoDisplaySignature = undefined
 	local aoDisplayedKey = undefined
 	local isLoadingAO = false
@@ -576,6 +1423,12 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	fn refreshAOSettings = (
+		local selectedCount = lbxMaterials.selection.numberSet
+		btnRenderAO.text = "Render AO for Selected IDs (" + (selectedCount as string) + ")"
+		btnRenderAO.enabled = (selectedCount > 0 and not isRenderingAO and not isExportingLODs)
+		local lodCount = lbxLODs.selection.numberSet
+		btnBatchExport.text = "Batch Export LODs (" + (lodCount as string) + ")"
+		btnBatchExport.enabled = (lodCount > 0 and not isRenderingAO and not isExportingLODs)
 		local materialEntry = selectedAOEntry()
 		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 		local propertyKey = GCMatterportAOKey materialEntry
@@ -688,6 +1541,168 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		refreshAOSettings()
 		return materialEntries
 	)
+
+	fn batchAOSetting settingField settingValue = (
+		if (isRenderingAO) do return false
+		local failures = #()
+		for rowIndex in (lbxMaterials.selection as array) do (
+			if (rowIndex >= 1 and rowIndex <= materialEntries.count) do (
+				local materialEntry = materialEntries[rowIndex]
+				if (GCMatterportIsCurrentMaterialEntry materialEntry) then (
+					local propertyKey = GCMatterportAOKey materialEntry
+					-- Write only the requested fields; disabled AO entries are editable here.
+					case settingField of (
+						#resolution: (
+							GCMatterportSceneProperties.setValue (propertyKey + "override") true
+							GCMatterportSceneProperties.setValue (propertyKey + "manualResolution") settingValue
+						)
+						#passes: GCMatterportSceneProperties.setValue (propertyKey + "passes") settingValue
+						#sizeCM: GCMatterportSceneProperties.setValue (propertyKey + "sizeCM") settingValue
+						#denoise: GCMatterportSceneProperties.setValue (propertyKey + "denoise") settingValue
+						#enabled: GCMatterportSceneProperties.setValue (propertyKey + "enabled") settingValue
+					)
+				) else append failures materialEntry.displayText
+			)
+		)
+		aoDisplaySignature = undefined
+		refreshLODs()
+		if (failures.count > 0) do messageBox "Some material assignments changed. Those entries were skipped; select them again." title: "Materials" beep: false
+		return (failures.count == 0)
+	)
+
+	on lbxMaterials rightClick do (
+		if (not isRenderingAO) do (
+			local listHandle = getListHandle lbxMaterials
+			if (listHandle != 0 and materialEntries.count > 0) do (
+				local cursorPoint = windows.screenToClient listHandle mouse.screenpos applyUIScaling: false
+				local rowHeight = windows.sendMessage listHandle 0x01A1 0 0
+				local topIndex = windows.sendMessage listHandle 0x018E 0 0
+				local packedPoint = (bit.and (cursorPoint.x as integer) 65535) + (bit.shift (bit.and (cursorPoint.y as integer) 65535) 16)
+				local hitResult = windows.sendMessage listHandle 0x01A9 0 packedPoint
+				local rowIndex = if (rowHeight > 0) then (topIndex + (floor (cursorPoint.y / rowHeight) as integer) + 1) else 0
+				if (cursorPoint.y >= 0 and (bit.shift hitResult -16) == 0 and rowIndex >= 1 and rowIndex <= materialEntries.count) do (
+					if (not lbxMaterials.selection[rowIndex]) do lbxMaterials.selection = #{rowIndex}
+					refreshAOSettings()
+					local wasTimerActive = tmrLODRefresh.active
+					tmrLODRefresh.active = false
+					try (popUpMenu GCMatterportMaterialContextMenu) catch (format "Materials menu: %\n" (getCurrentException()))
+					tmrLODRefresh.active = wasTimerActive
+				)
+			)
+		)
+	)
+
+	fn renderSelectedAO = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedEntries = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect materialEntries[rowIndex]
+		if (selectedEntries.count == 0) do return false
+		if (maxFilePath == "" or maxFileName == "") do (
+			messageBox "Save the MAX scene before rendering AO. Images are saved beside the scene in export\\_maps." title: "Render AO" beep: false
+			return false
+		)
+		local outputFolder = maxFilePath + "export\\_maps\\"
+		local denoiserPath = GCMatterportDenoiserPath()
+		local completedCount = 0
+		local skippedCount = 0
+		local reportLines = #()
+		local previousTimerActive = tmrLODRefresh.active
+		local originalLODSelection = lbxLODs.selection
+		local originalMaterialSelection = lbxMaterials.selection
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		isRenderingAO = true
+		tmrLODRefresh.active = false
+		refreshAOSettings()
+		-- Disable this rollout while native render/denoiser messages are being processed.
+		for controlState in controlStates do controlState[1].enabled = false
+		try (
+			for materialEntry in selectedEntries do (
+				local entryCaption = materialEntry.layerName + " / ID " + (materialEntry.materialID as string)
+				local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
+				if (aoOptions == undefined) then (
+					append reportLines (entryCaption + ": invalid or stale material settings.")
+				) else if (not aoOptions.useCoronaAO) then (
+					skippedCount += 1
+					append reportLines (entryCaption + ": skipped (Use Corona AO disabled).")
+				) else (
+					local bakeResult = GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath
+					if (bakeResult.errorMessage == undefined and bakeResult.filePath != undefined) then (
+						try (
+							GCMatterportAssignAO materialEntry bakeResult.filePath
+							completedCount += 1
+						) catch (append reportLines (entryCaption + ": " + (getCurrentException() as string)))
+					) else (
+						append reportLines (entryCaption + ": " + bakeResult.errorMessage)
+					)
+					if (bakeResult.cancelled) do exit
+				)
+			)
+		) catch (append reportLines (getCurrentException() as string))
+		for controlState in controlStates do controlState[1].enabled = controlState[2]
+		isRenderingAO = false
+		lbxLODs.selection = originalLODSelection
+		lbxMaterials.selection = originalMaterialSelection
+		aoDisplaySignature = undefined
+		refreshLODs()
+		tmrLODRefresh.active = previousTimerActive
+		redrawViews()
+		local summaryText = "AO rendered and assigned: " + (completedCount as string) + " of " + (selectedEntries.count as string) + ". Skipped: " + (skippedCount as string) + "."
+		if (completedCount > 0) do summaryText += "\nImages: " + outputFolder
+		for reportLine in reportLines do summaryText += "\n" + reportLine
+		messageBox summaryText title: "Render AO" beep: false
+		return (completedCount + skippedCount == selectedEntries.count)
+	)
+
+	on btnRenderAO pressed do renderSelectedAO()
+
+
+	fn batchExportLODs = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
+		if (selectedLayerNames.count == 0) do return false
+		local preflightResult = GCMatterportExportPreflight selectedLayerNames
+		if (preflightResult[2].count > 0) do (
+			local messageContent = "Nothing was exported. Fix these issues in the selected LODs:\n"
+			for issue in preflightResult[2] do messageContent += "\n" + issue
+			messageBox messageContent title: "Batch Export LODs" beep: false
+			return false
+		)
+		local exportJobs = preflightResult[1]
+		local exportFolder = maxFilePath + "export\\"
+		local completedCount = 0
+		local reportLines = #()
+		local previousTimerActive = tmrLODRefresh.active
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		isExportingLODs = true
+		tmrLODRefresh.active = false
+		refreshAOSettings()
+		for controlState in controlStates do controlState[1].enabled = false
+		try (
+			for exportJob in exportJobs do (
+				local failureReason = GCMatterportExportOneLOD exportJob exportFolder
+				if (failureReason == undefined) then (
+					completedCount += 1
+				) else (
+					append reportLines (exportJob.layerName + ": " + failureReason)
+					-- Stop on operational failure/cancellation; preflight already checked the whole set.
+					exit
+				)
+			)
+		) catch (append reportLines (getCurrentException() as string))
+		for controlState in controlStates do controlState[1].enabled = controlState[2]
+		isExportingLODs = false
+		aoDisplaySignature = undefined
+		refreshLODs()
+		tmrLODRefresh.active = previousTimerActive
+		redrawViews()
+		local summaryText = "WebGL GLB exported: " + (completedCount as string) + " of " + (exportJobs.count as string) + "."
+		if (completedCount > 0) do summaryText += "\nOutput: " + exportFolder
+		for reportLine in reportLines do summaryText += "\n" + reportLine
+		messageBox summaryText title: "Batch Export LODs" beep: false
+		return (completedCount == exportJobs.count)
+	)
+
+	on btnBatchExport pressed do batchExportLODs()
+
 
 	fn refreshLODs selectedLayerNames: undefined = (
 		local freshEntries = GCMatterportGetData()
@@ -808,6 +1823,119 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		)
 		messageBox deletionSummary title: "Delete LODs" beep: false
 		return (skippedReasons.count == 0)
+	)
+
+
+	fn getLODPropertyEntries layerName = (
+		local lodLayer = LayerManager.getLayerFromName layerName
+		local layerNodes = #()
+		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
+		if (not GCMatterportIsLODReady layerNodes) do return undefined
+		local entries = GCMatterportGetMaterials #(layerName)
+		if (entries.count == 0 or entries.count != layerNodes[1].material.materialList.count) do return undefined
+		return entries
+	)
+
+	fn canPreviewLOD = (
+		if (isRenderingAO or isExportingLODs or lbxLODs.selection.numberSet != 1) do return false
+		local rowIndex = (lbxLODs.selection as array)[1]
+		if (rowIndex < 1 or rowIndex > lodEntries.count) do return false
+		local layerName = lodEntries[rowIndex].layerName
+		return ((getLODPropertyEntries layerName) != undefined and (GCMatterportLODHasGLB layerName))
+	)
+
+	fn previewSelectedLOD = (
+		if (not canPreviewLOD()) do return false
+		local rowIndex = (lbxLODs.selection as array)[1]
+		try (
+			GCMatterportPreviewLOD lodEntries[rowIndex].layerName
+		) catch (
+			messageBox ("Cannot open Model Viewer.\n" + (getCurrentException() as string)) title: "Preview in Model Viewer" beep: false
+			return false
+		)
+		return true
+	)
+
+
+	fn copyableLODEntries = (
+		if (isRenderingAO or lbxLODs.selection.numberSet != 1) do return undefined
+		local rowIndex = (lbxLODs.selection as array)[1]
+		if (rowIndex < 1 or rowIndex > lodEntries.count) do return undefined
+		local entries = getLODPropertyEntries lodEntries[rowIndex].layerName
+		if (entries == undefined) do return undefined
+		local seenIDs = #()
+		for materialEntry in entries do (
+			if (materialEntry.materialID < 1 or (findItem seenIDs materialEntry.materialID) != 0 or GCMatterportGetEffectiveAOOptions materialEntry == undefined) do return undefined
+			append seenIDs materialEntry.materialID
+		)
+		return entries
+	)
+
+	fn canCopyLODProperties = (
+		return (copyableLODEntries() != undefined)
+	)
+
+	fn canPasteLODProperties = (
+		return (not isRenderingAO and GCMatterportAOClipboard != undefined and GCMatterportAOClipboard.count > 0 and lbxLODs.selection.numberSet > 0)
+	)
+
+	fn copyLODProperties = (
+		local entries = copyableLODEntries()
+		if (entries == undefined) do (
+			messageBox "Select exactly one valid LOD with glTF materials and unique Material IDs to copy its AO settings." title: "Copy Material Properties" beep: false
+			return false
+		)
+		local clipboardEntries = #()
+		for materialEntry in entries do (
+			local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
+			-- Scalar values only: no node/material/option references or computed resolution.
+			append clipboardEntries (GCMatterportAOClipboardEntry materialID: materialEntry.materialID useCoronaAO: aoOptions.useCoronaAO passes: aoOptions.passes sizeCM: aoOptions.sizeCM useVRayDenoiser: aoOptions.useVRayDenoiser customResolution: aoOptions.customResolution manualResolution: aoOptions.manualResolution)
+		)
+		GCMatterportAOClipboard = clipboardEntries
+		return true
+	)
+
+	fn pasteLODProperties = (
+		if (not canPasteLODProperties()) do return false
+		local targetLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
+		local reportLines = #()
+		local pastedCount = 0
+		for layerName in targetLayerNames do (
+			local entries = getLODPropertyEntries layerName
+			if (entries == undefined) then (
+				append reportLines (layerName + ": skipped; expected one object with a valid glTF MultiMaterial.")
+			) else (
+				local matchedIDs = #()
+				for materialEntry in entries do (
+					local idCount = 0
+					for otherEntry in entries where (otherEntry.materialID == materialEntry.materialID) do idCount += 1
+					local sourceSettings = undefined
+					for clipboardEntry in GCMatterportAOClipboard where (clipboardEntry.materialID == materialEntry.materialID) do sourceSettings = clipboardEntry
+					local entryCaption = layerName + " / ID " + (materialEntry.materialID as string)
+					if (materialEntry.materialID < 1 or idCount != 1 or not GCMatterportIsCurrentMaterialEntry materialEntry) then (
+						append reportLines (entryCaption + ": skipped; invalid, duplicate or changed Material ID.")
+					) else if (sourceSettings == undefined) then (
+						append reportLines (entryCaption + ": unchanged; no matching ID in the copied settings.")
+					) else (
+						append matchedIDs materialEntry.materialID
+						local aoOptions = GCMatterportAOOptions useCoronaAO: sourceSettings.useCoronaAO passes: sourceSettings.passes sizeCM: sourceSettings.sizeCM useVRayDenoiser: sourceSettings.useVRayDenoiser customResolution: sourceSettings.customResolution manualResolution: sourceSettings.manualResolution
+						-- Save writes the target node/ID key; auto resolution is recomputed for its LOD.
+						try (
+							if (GCMatterportSaveAOOptions materialEntry aoOptions) then pastedCount += 1 else append reportLines (entryCaption + ": skipped; the material assignment changed.")
+						) catch (
+							append reportLines (entryCaption + ": could not save AO settings. " + (getCurrentException() as string))
+						)
+					)
+				)
+				for clipboardEntry in GCMatterportAOClipboard where ((findItem matchedIDs clipboardEntry.materialID) == 0) do append reportLines (layerName + ": no valid target for copied ID " + (clipboardEntry.materialID as string) + ".")
+			)
+		)
+		aoDisplaySignature = undefined
+		refreshLODs()
+		local summaryText = "AO settings pasted to " + (pastedCount as string) + " Material ID(s)."
+		for reportLine in reportLines do summaryText += "\n" + reportLine
+		messageBox summaryText title: "Paste Material Properties" beep: false
+		return (reportLines.count == 0)
 	)
 
 

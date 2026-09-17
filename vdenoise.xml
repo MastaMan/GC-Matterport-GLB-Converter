@@ -1,0 +1,19 @@
+<VDenoise>
+ <FrameOperations>
+  <SkipExistingFrames>0</SkipExistingFrames>
+  <DenoiseElements Preset="1" MainElementIndex="-1"></DenoiseElements>
+  <DenoisingQuality>
+   <Preset>default</Preset>
+   <Boost>0</Boost>
+   <Threshold>0.500</Threshold>
+  </DenoisingQuality>
+ </FrameOperations>
+ <AncillaryOptions>
+  <Verbosity>information</Verbosity>
+  <DisplayProgress>1</DisplayProgress>
+  <AutoClose>1</AutoClose>
+ </AncillaryOptions>
+ <PerformanceOptions>
+  <HardwareAcceleration GPUMemoryLimitMB="0"></HardwareAcceleration>
+ </PerformanceOptions>
+</VDenoise>
