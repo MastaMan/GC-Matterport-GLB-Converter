@@ -1115,7 +1115,35 @@ fn GCMatterportViewerIsInstalled viewerFolder = (
 	return true
 )
 
-fn GCMatterportInstallViewerArchive archivePath = (
+
+fn GCMatterportDownloadFile sourceURL destination = (
+	local client = dotNetObject "System.Net.WebClient"
+	local downloadError = undefined
+	try (
+		client.DownloadFile sourceURL destination
+		local downloadedFile = dotNetObject "System.IO.FileInfo" destination
+		if (not downloadedFile.Exists or downloadedFile.Length == 0) do throw "The downloaded file is empty."
+	) catch (downloadError = getCurrentException() as string)
+	client.Dispose()
+	if (downloadError != undefined) do throw downloadError
+	return true
+)
+
+fn GCMatterportPrepareViewer stageRoot = (
+	local engineText = (dotNetClass "System.IO.File").ReadAllText (stageRoot + "\\js\\engine.js")
+	local decoderMatch = (dotNetClass "System.Text.RegularExpressions.Regex").Match engineText "https://www[.]gstatic[.]com/basis-universal/versioned/[A-Za-z0-9_-]+/"
+	if (not decoderMatch.Success) do throw "The viewer engine does not specify a supported Basis decoder version."
+	makeDir (stageRoot + "\\js\\basis") all:true
+	for decoderName in #("basis_transcoder.js", "basis_transcoder.wasm") do (
+		GCMatterportDownloadFile (decoderMatch.Value + decoderName) (stageRoot + "\\js\\basis\\" + decoderName)
+	)
+	local utf8 = dotNetObject "System.Text.UTF8Encoding" false
+	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\index.html") "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Model Viewer</title>\n<link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/favicon-16x16.png\">\n<style>\nhtml, body { padding: 0; margin: 0; background: #f7f7f7; }\nmodel-viewer { width: 100vw; height: 100vh; }\n#error { position: fixed; top: 16px; left: 16px; right: 16px; padding: 12px; background: white; color: #900; font: 14px sans-serif; }\n</style>\n</head>\n<body>\n<model-viewer alt=\"\" shadow-intensity=\"1\" camera-controls\n environment-image=\"hdri/studio.hdr\" camera-orbit=\"-36deg 72deg\" field-of-view=\"30deg\"\n exposure=\"0.4\" tone-mapping=\"aces\" min-field-of-view=\"50deg\"\n max-field-of-view=\"50deg\" touch-action=\"pan-y\"></model-viewer>\n<div id=\"error\" hidden></div>\n<script type=\"module\">\nconst errorBox = document.querySelector('#error');\nconst reportError = message => { errorBox.textContent = message; errorBox.hidden = false; };\ntry {\n    const engineResponse = await fetch('/js/engine.js');\n    if (!engineResponse.ok) throw new Error('Cannot load Model Viewer engine: ' + engineResponse.status);\n    const engineURL = URL.createObjectURL(new Blob([await engineResponse.text()], { type: 'application/javascript' }));\n    try { await import(engineURL); } finally { URL.revokeObjectURL(engineURL); }\n    const viewerClass = customElements.get('model-viewer');\n    viewerClass.ktx2TranscoderLocation = '/js/basis/';\n    const parameters = new URLSearchParams(location.search);\n    const model = parameters.get('model');\n    if (!model || !/^[a-f0-9]{64}$/.test(model)) throw new Error('A valid exported LOD is required.');\n    const viewer = document.querySelector('model-viewer');\n    document.title = parameters.get('title') || 'Model Viewer';\n    viewer.alt = document.title;\n    window.devicePixelRatio = 2;\n    viewer.addEventListener('error', () => reportError('The exported GLB could not be loaded.'));\n    viewer.src = '/models/' + encodeURIComponent(model) + '.glb?v=' + encodeURIComponent(parameters.get('v') || '');\n} catch (error) {\n    reportError(error.message || 'Model Viewer could not start.');\n}\n</script>\n</body>\n</html>\n" utf8
+	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\mime.types") "application/javascript js\napplication/wasm wasm\nmodel/gltf-binary glb\nimage/vnd.radiance hdr\ntext/html html\ntext/plain txt\nimage/png png\n" utf8
+	return true
+)
+
+fn GCMatterportInstallViewerArchive archivePath prepareOriginal:false normalizedArchive:undefined = (
 	local installRoot = GCMatterportRuntimeFolder + "model-viewer"
 	local stageRoot = GCMatterportRuntimeFolder + "._viewer_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N")
 	local backupRoot = stageRoot + "_previous"
@@ -1128,7 +1156,7 @@ fn GCMatterportInstallViewerArchive archivePath = (
 		makeDir stageRoot all:true
 		archive = (dotNetClass "System.IO.Compression.ZipFile").OpenRead archivePath
 		-- Extract only the known runtime paths; archive paths never determine destinations.
-		for relativeFile in GCMatterportViewerFiles() do (
+		for relativeFile in GCMatterportViewerFiles() where (not prepareOriginal or (findItem #("js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm") relativeFile) == 0) do (
 			local entry = archive.GetEntry (substituteString relativeFile "\\" "/")
 			if (entry == undefined or entry.Length == 0) do throw ("Viewer archive is missing: " + relativeFile)
 			local destination = stageRoot + "\\" + relativeFile
@@ -1137,7 +1165,9 @@ fn GCMatterportInstallViewerArchive archivePath = (
 		)
 		archive.Dispose()
 		archive = undefined
+		if (prepareOriginal) do GCMatterportPrepareViewer stageRoot
 		if (not GCMatterportViewerIsInstalled (stageRoot + "\\")) do throw "The extracted viewer is incomplete."
+		if (normalizedArchive != undefined) do (dotNetClass "System.IO.Compression.ZipFile").CreateFromDirectory stageRoot normalizedArchive
 		GCMatterportStopPreviewServer()
 		if (doesDirectoryExist installRoot) do (
 			(dotNetClass "System.IO.Directory").Move installRoot backupRoot
@@ -1157,11 +1187,35 @@ fn GCMatterportInstallViewerArchive archivePath = (
 	return true
 )
 
+
+fn GCMatterportUpdateViewer = (
+	local token = ((dotNetClass "System.Guid").NewGuid()).ToString("N")
+	local downloadedArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".download.zip"
+	local readyArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".ready.zip"
+	local backupArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".previous.zip"
+	local archivePath = GCMatterportRuntimeFolder + "model-viewer.zip"
+	local updateFailure = undefined
+	try (
+		GCMatterportDownloadFile "https://raw.githubusercontent.com/MastaArt/GC-Tools/main/model-viewer.zip" downloadedArchive
+		GCMatterportInstallViewerArchive downloadedArchive prepareOriginal:true normalizedArchive:readyArchive
+		if (doesFileExist archivePath) then (
+			(dotNetClass "System.IO.File").Replace readyArchive archivePath backupArchive
+		) else (
+			(dotNetClass "System.IO.File").Move readyArchive archivePath
+		)
+	) catch (updateFailure = getCurrentException() as string)
+	for temporaryFile in #(downloadedArchive, readyArchive, backupArchive) where (doesFileExist temporaryFile) do (
+		try (deleteFile temporaryFile) catch (format "Viewer archive cleanup: %\n" (getCurrentException()))
+	)
+	if (updateFailure != undefined) do throw updateFailure
+	return true
+)
+
 fn GCMatterportEnsureViewerInstalled = (
 	local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
 	if (GCMatterportViewerIsInstalled viewerFolder) do return true
 	local archivePath = GCMatterportRuntimeFolder + "model-viewer.zip"
-	if (not doesFileExist archivePath) do throw "model-viewer.zip is missing. Restore it beside the converter script."
+	if (not doesFileExist archivePath) do return GCMatterportUpdateViewer()
 	return GCMatterportInstallViewerArchive archivePath
 )
 
@@ -2430,65 +2484,66 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	hyperlink lblCopy ""  align: #center
 	
 	label lblDummy3 ""
+	button btnUpdateViewer "Download / Update Model Viewer" width:270 height:26
 	
 	timer tmrRestart "" active: false interval: 300
 	    
-	fn downloadFile url dl = (
-		deleteFile dl
-		w = dotNetObject "System.Net.WebClient"			
-		try(
-			spm = dotNetClass "System.Net.ServicePointManager"
-			spm.SecurityProtocol = spm.SecurityProtocol.TLS12				
-			w.DownloadFile (url + "?time=" + timestamp() as string) dl				
-		) catch(
-			return false
-		)
-		
-		return true
-	)
-	
+
 	fn bgUpdate = (
+		-- Keep the existing project endpoint; an unavailable/private repository fails without replacing files.
 		local url = "https://raw.githubusercontent.com/MastaArt/GC-Matterport-GLB-Converter/main/"
-		local main = url + "GC-Matterport-GLB-Converter.ms"
-		
-		local additionalFiles = #(
-			"INSTALL.mcr", 
-			"jpegoptim.exe", 
-			"convert.exe",
-			"model-viewer.zip",
-			"7za.exe",
-			"extract.bat",
-			"gltfpack.exe",
-			"gltfpack.bat",
-			"gltfpack_webgl.bat",
-			"denoise.bat",
-			"vdenoise.xml",
-			"xnormal.bat",
-			"xnormal.xml"
-		)
-		
-		local this = getThisScriptFileName()
-		local p = getFileNamePath (getThisScriptFileName())
-		local dl = this + ".tmp"
-		local r = downloadFile main dl
-		if(not r or not doesFileExist dl) do return print "Can't download updates!"
-		local vn = getIniSetting dl "INFO" "VERSION"
-		local vo = getIniSetting this "INFO" "VERSION"
-		
-		if(vn > vo) do (
-			deleteFile this
-			renameFile dl this
-			
-			for n in additionalFiles do (
-				downloadFile (url + n) (p + n)
+		local currentScript = GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms"
+		local stage = GCMatterportRuntimeFolder + "._update_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
+		local replacedFiles = #()
+		local updateFailure = undefined
+		local hasNewVersion = false
+		local rollbackFailed = false
+		try (
+			makeDir stage all:true
+			local downloadedScript = stage + "GC-Matterport-GLB-Converter.ms"
+			GCMatterportDownloadFile (url + "GC-Matterport-GLB-Converter.ms") downloadedScript
+			if ((getIniSetting downloadedScript "INFO" "NAME") != (getIniSetting currentScript "INFO" "NAME")) do throw "The update belongs to a different script."
+			local remoteVersion = dotNetObject "System.Version" (getIniSetting downloadedScript "INFO" "VERSION")
+			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
+			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
+			if (hasNewVersion) do (
+				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "GC-Matterport-GLB-Converter.ms")
+				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
+				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
+				for fileName in updateFiles do (
+					local destination = GCMatterportRuntimeFolder + fileName
+					local hadPrevious = doesFileExist destination
+					if (hadPrevious) then (
+						(dotNetClass "System.IO.File").Replace (stage + fileName) destination (stage + fileName + ".previous")
+					) else (
+						(dotNetClass "System.IO.File").Move (stage + fileName) destination
+					)
+					append replacedFiles #(fileName, hadPrevious)
+				)
+				GCMatterportInstallViewerArchive (GCMatterportRuntimeFolder + "model-viewer.zip")
+				tmrRestart.active = true
 			)
-			
-			tmrRestart.active = true
+		) catch (updateFailure = getCurrentException() as string)
+		if (updateFailure != undefined) do (
+			for fileIndex in replacedFiles.count to 1 by -1 do (
+				local item = replacedFiles[fileIndex]
+				local destination = GCMatterportRuntimeFolder + item[1]
+				try (
+					if (item[2]) then (
+						(dotNetClass "System.IO.File").Replace (stage + item[1] + ".previous") destination undefined
+					) else deleteFile destination
+				) catch (
+					rollbackFailed = true
+					format "Update rollback failed for %; backups retained in %: %\n" item[1] stage (getCurrentException())
+				)
+			)
+			format "Converter update unavailable; local version retained. %\n" updateFailure
 		)
-		
-		deleteFile dl
+		-- The staging directory belongs only to this update invocation.
+		if (not rollbackFailed and doesDirectoryExist stage) do try ((dotNetClass "System.IO.Directory").Delete stage true) catch (format "Update staging cleanup: %\n" (getCurrentException()))
+		return (updateFailure == undefined)
 	)
-	
+
 	fn updateWorker = (
 		m = dotnetobject "CSharpUtilities.SynchronizingBackgroundWorker"
 		m.WorkerSupportsCancellation = true 
@@ -2519,6 +2574,16 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 		return (data version: v author: a name: n description: o developer: d client: c help: h releases: r)
     )
 	
+	on btnUpdateViewer pressed do (
+		if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do return false
+		btnUpdateViewer.enabled = false
+		try (
+			GCMatterportUpdateViewer()
+			messageBox "Model Viewer was downloaded and installed." title:"Model Viewer" beep:false
+		) catch (messageBox ("Model Viewer update failed.\n" + (getCurrentException() as string)) title:"Model Viewer" beep:false)
+		btnUpdateViewer.enabled = true
+	)
+
 	on tmrRestart tick do (
 		this = getThisScriptFileName()
 		try(fileIn this) catch()

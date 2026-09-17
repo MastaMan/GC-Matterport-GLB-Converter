@@ -2,3 +2,5 @@
 
 /model-viewer/
 /._viewer_*/
+/._viewer_*.zip
+/._update_*/
