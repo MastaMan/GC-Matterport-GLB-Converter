@@ -142,8 +142,8 @@ fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
 	if (expectedText == "") do return false
 	GCMatterportConfirmationContext = #(messageContent, expectedText)
 	rollout typedConfirmation "Confirm LOD transfer" (
-		local promptContent = GCMatterportConfirmationContext[1]
-		local requiredText = GCMatterportConfirmationContext[2]
+		local promptContent = ""
+		local requiredText = "OK"
 		local wasConfirmed = false
 
 		label lblPrompt "" width: 380 height: 18 align: #left
@@ -178,6 +178,9 @@ fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
 		)
 
 		on typedConfirmation open do (
+			promptContent = GCMatterportConfirmationContext[1]
+			requiredText = GCMatterportConfirmationContext[2]
+			wasConfirmed = false
 			lblPrompt.text = wrapPrompt promptContent
 			local promptLines = filterString lblPrompt.text "\n" splitEmptyTokens: true
 			local fontExtent = getTextExtent "Ag"
