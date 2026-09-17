@@ -53,7 +53,19 @@ global '*' = '@'()
 struct GCMatterportLODEntry (
 	layerName,
 	displayText,
-	objectCount
+	objectCount,
+	isReady
+)
+
+fn GCMatterportIsLODReady layerNodes = (
+	if (layerNodes.count != 1 or glTFMaterial == undefined) do return false
+	local lodMaterial = layerNodes[1].material
+	if (lodMaterial == undefined or classOf lodMaterial != MultiMaterial) do return false
+	if (lodMaterial.materialList.count == 0) do return false
+	for subMaterial in lodMaterial.materialList do (
+		if (subMaterial == undefined or classOf subMaterial != glTFMaterial) do return false
+	)
+	return true
 )
 
 fn GCMatterportGetData = (
@@ -67,28 +79,137 @@ fn GCMatterportGetData = (
 		local lodLayer = LayerManager.getLayerFromName sceneLayerName
 		local layerNodes = #()
 		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
-		local displayPrefix = if (layerNodes.count > 0) then (((dotNetClass "System.Char").ConvertFromUtf32 10003) + " ") else ""
-		GCMatterportLODEntry layerName: sceneLayerName displayText: (displayPrefix + sceneLayerName) objectCount: layerNodes.count
+		local isLayerReady = GCMatterportIsLODReady layerNodes
+		local displayPrefix = ""
+		if (layerNodes.count > 1) then (
+			displayPrefix = "[ERROR: More than one object] "
+		) else if (isLayerReady) then (
+			displayPrefix = "[" + ((dotNetClass "System.Char").ConvertFromUtf32 10003) + "] "
+		) else if (layerNodes.count == 1) do (
+			displayPrefix = "[Only Object] "
+		)
+		GCMatterportLODEntry layerName: sceneLayerName displayText: (displayPrefix + sceneLayerName) objectCount: layerNodes.count isReady: isLayerReady
 	)
+)
+
+struct GCMatterportMaterialEntry (
+	layerName,
+	nodeRef,
+	materialRef,
+	slotIndex,
+	materialID,
+	materialName,
+	displayText
+)
+
+fn GCMatterportGetMaterials selectedLayerNames = (
+	local materialEntries = #()
+	if (glTFMaterial == undefined) do return materialEntries
+	for selectedLayerName in selectedLayerNames do (
+		local lodLayer = LayerManager.getLayerFromName selectedLayerName
+		local layerNodes = #()
+		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
+		if (layerNodes.count == 1) do (
+			local sceneNode = layerNodes[1]
+			local parentMaterial = sceneNode.material
+			if (parentMaterial != undefined and classOf parentMaterial == MultiMaterial) do (
+				for slotIndex in 1 to parentMaterial.materialList.count do (
+					local subMaterial = parentMaterial.materialList[slotIndex]
+					if (slotIndex <= parentMaterial.materialIDList.count and subMaterial != undefined and classOf subMaterial == glTFMaterial) do (
+						local actualMaterialID = parentMaterial.materialIDList[slotIndex]
+						local rowText = (actualMaterialID as string) + ": " + subMaterial.name
+						append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialRef: subMaterial slotIndex: slotIndex materialID: actualMaterialID materialName: subMaterial.name displayText: rowText)
+					)
+				)
+			)
+		)
+	)
+	return materialEntries
 )
 
 fn GCMatterportLODsReady = (
 	local lodEntries = GCMatterportGetData()
-	if (lodEntries.count == 0 or glTFMaterial == undefined) do return false
+	if (lodEntries.count == 0) do return false
 	for lodEntry in lodEntries do (
-		local lodLayer = LayerManager.getLayerFromName lodEntry.layerName
-		if (lodLayer == undefined) do return false
-		local layerNodes = #()
-		lodLayer.nodes &layerNodes
-		if (layerNodes.count != 1) do return false
-		local lodMaterial = layerNodes[1].material
-		if (lodMaterial == undefined or classOf lodMaterial != MultiMaterial) do return false
-		if (lodMaterial.materialList.count != 2) do return false
-		for slotIndex in 1 to 2 do (
-			if (lodMaterial.materialList[slotIndex] == undefined or classOf lodMaterial.materialList[slotIndex] != glTFMaterial) do return false
-		)
+		if (not lodEntry.isReady) do return false
 	)
 	return true
+)
+
+global GCMatterportConfirmationContext = #("", "OK")
+
+fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
+	if (expectedText == "") do return false
+	GCMatterportConfirmationContext = #(messageContent, expectedText)
+	rollout typedConfirmation "Confirm LOD transfer" (
+		local promptContent = GCMatterportConfirmationContext[1]
+		local requiredText = GCMatterportConfirmationContext[2]
+		local wasConfirmed = false
+
+		label lblPrompt "" width: 380 height: 18 align: #left
+		label lblInstruction "" width: 380 align: #left
+		edittext edtConfirmation "" width: 380
+		button btnConfirm "Confirm" width: 120 across: 2 enabled: false
+		button btnCancel "Cancel" width: 120
+
+		fn hasExpectedInput = (
+			local typedText = trimLeft (trimRight edtConfirmation.text " \t\r\n") " \t\r\n"
+			return (dotNetClass "System.String").Equals typedText requiredText (dotNetClass "System.StringComparison").Ordinal
+		)
+
+		fn wrapPrompt promptText = (
+			local wrappedText = ""
+			local currentLine = ""
+			for characterIndex in 1 to promptText.count do (
+				local nextCharacter = substring promptText characterIndex 1
+				if (nextCharacter == "\n") then (
+					wrappedText += currentLine + "\n"
+					currentLine = ""
+				) else (
+					local measuredSize = getTextExtent (currentLine + nextCharacter)
+					if (measuredSize.x > 360 and currentLine != "") do (
+						wrappedText += currentLine + "\n"
+						currentLine = ""
+					)
+					currentLine += nextCharacter
+				)
+			)
+			return wrappedText + currentLine
+		)
+
+		on typedConfirmation open do (
+			lblPrompt.text = wrapPrompt promptContent
+			local promptLines = filterString lblPrompt.text "\n" splitEmptyTokens: true
+			local fontExtent = getTextExtent "Ag"
+			local promptHeight = promptLines.count * (fontExtent.y + 2)
+			-- Position controls below measured text, including wrapped layer names.
+			lblPrompt.pos = [15, 12]
+			lblPrompt.height = promptHeight
+			lblInstruction.pos = [15, 12 + promptHeight + 8]
+			edtConfirmation.pos = [15, 12 + promptHeight + 30]
+			btnConfirm.pos = [79, 12 + promptHeight + 60]
+			btnCancel.pos = [211, 12 + promptHeight + 60]
+			setDialogSize typedConfirmation [410, 12 + promptHeight + 94]
+			lblInstruction.text = "Type " + requiredText + " to confirm."
+			edtConfirmation.text = ""
+			btnConfirm.enabled = false
+			setFocus edtConfirmation
+		)
+		on edtConfirmation changed typedText do (
+			btnConfirm.enabled = hasExpectedInput()
+		)
+		on btnConfirm pressed do (
+			if (hasExpectedInput()) do (
+				wasConfirmed = true
+				destroyDialog typedConfirmation
+			)
+		)
+		on btnCancel pressed do destroyDialog typedConfirmation
+	)
+	GCMatterportConfirmationContext = #(messageContent, expectedText)
+	createDialog typedConfirmation width: 410 modal: true escapeEnable: false
+	GCMatterportConfirmationContext = #("", "OK")
+	return typedConfirmation.wasConfirmed
 )
 
 global _rExportGCMatterportGLBConverter
@@ -101,10 +222,6 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 		button btnCreateLayers "Create Layers" offset: [-90, -4]
 	)
 	
-	group "Create Materials" (
-		label lblMaterials "Apply Materials to objects in Layers" across: 2 align: #left
-		button btnAssignDefaultMaterials "Assign Default Materials"  align: #right  offset: [-0, -4]
-	)
 	fn createLODLayerNames layerBaseName = (
 		local trimmedLayerName = trimLeft (trimRight layerBaseName " \t\r\n") " \t\r\n"
 		if (trimmedLayerName == "") do return #()
@@ -166,10 +283,9 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 		return true
 	)
 
-	fn assignDefaultMaterials = (
-		local lodEntries = GCMatterportGetData()
+	fn assignDefaultMaterials lodEntries = (
 		if (lodEntries.count == 0) do (
-			messageBox "No _LOD layers were found in the scene." title: "Assign Default Materials" beep: false
+			messageBox "Select one or more LOD layers in the list." title: "Assign Default Materials" beep: false
 			return false
 		)
 		if (glTFMaterial == undefined) do (
@@ -190,16 +306,26 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 					append skippedReasons (lodEntry.layerName + ": expected exactly one object, found " + (layerNodes.count as string) + ".")
 				) else (
 					local targetNode = layerNodes[1]
+					local hasGLTFSubMaterial = false
+					if (targetNode.material != undefined and classOf targetNode.material == MultiMaterial) do (
+						for subMaterial in targetNode.material.materialList do (
+							if (subMaterial != undefined and classOf subMaterial == glTFMaterial) do hasGLTFSubMaterial = true
+						)
+					)
 					if (targetNode.material != undefined and targetNode.material.name == lodEntry.layerName) then (
 						append skippedReasons (lodEntry.layerName + ": the object already has a material with this name.")
+					) else if (hasGLTFSubMaterial) then (
+						append skippedReasons (lodEntry.layerName + ": the existing MultiMaterial already contains a glTFMaterial; preserved.")
 					) else (
 						try (
-							local firstMaterial = glTFMaterial name: lodEntry.layerName
-							local secondMaterial = glTFMaterial name: lodEntry.layerName
-							local lodMaterial = MultiMaterial numsubs: 2 name: lodEntry.layerName
-							lodMaterial.materialIDList = #(1, 2)
-							lodMaterial.materialList = #(firstMaterial, secondMaterial)
-							lodMaterial.names = #(lodEntry.layerName, lodEntry.layerName)
+							if ((getLODBaseName lodEntry.layerName) == undefined) do throw "Expected a layer named GC-<name>_LOD0 through GC-<name>_LOD3."
+							local lodSuffix = substring lodEntry.layerName (lodEntry.layerName.count - 3) 4
+							local subMaterialNames = for slotIndex in 1 to 6 collect ("ID" + (slotIndex as string) + "_" + lodSuffix)
+							local subMaterials = for subMaterialName in subMaterialNames collect (glTFMaterial name: subMaterialName)
+							local lodMaterial = MultiMaterial numsubs: 6 name: lodEntry.layerName
+							lodMaterial.materialIDList = #(1, 2, 3, 4, 5, 6)
+							lodMaterial.materialList = subMaterials
+							lodMaterial.names = subMaterialNames
 							targetNode.material = lodMaterial
 							assignedCount += 1
 						) catch (
@@ -209,6 +335,7 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 				)
 			)
 		)
+		_rExportGCMatterportGLBConverter.refreshLODs()
 		local assignmentSummary = "Materials assigned to " + (assignedCount as string) + " of " + (lodEntries.count as string) + " LOD layers."
 		if (skippedReasons.count > 0) do (
 			assignmentSummary += "\n\nNot all layers were assigned:\n"
@@ -217,8 +344,6 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 		messageBox assignmentSummary title: "Assign Default Materials" beep: false
 		return (skippedReasons.count == 0)
 	)
-
-	on btnAssignDefaultMaterials pressed do assignDefaultMaterials()
 
 	on btnCreateLayers pressed do createLODLayers()
 )
@@ -230,6 +355,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		button btnRefresList "Refresh List" width: 100 across: 3
 		button btnDeleteSelected "Delete LODs" width: 100
 		button btnAddToLOD "Add to LOD" width: 100
+		button btnAssignDefaultMaterials "Assign Default Materials" width: 310 align: #center
 	)
 	
 	group "Materials" (
@@ -237,14 +363,58 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	local lodEntries = #()
+	local materialEntries = #()
+	local previousSceneSelection = undefined
 
 	timer tmrLODRefresh interval: 500 active: false
 
-	fn getLODListHandle = (
-		for controlHandle in lbxLODs.hwnd do (
+	fn getListHandle listControl = (
+		for controlHandle in listControl.hwnd do (
 			if ((UIAccessor.GetWindowClassName controlHandle) == "ListBox") do return controlHandle
 		)
 		return 0
+	)
+
+	fn sameMaterialEntry firstEntry secondEntry = (
+		return (firstEntry.layerName == secondEntry.layerName and firstEntry.nodeRef == secondEntry.nodeRef and firstEntry.materialRef == secondEntry.materialRef and firstEntry.slotIndex == secondEntry.slotIndex)
+	)
+
+	fn refreshMaterials = (
+		local selectedLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
+		local freshEntries = GCMatterportGetMaterials selectedLayerNames
+		local hasDisplayChanges = (freshEntries.count != materialEntries.count)
+		if (not hasDisplayChanges) do (
+			for rowIndex in 1 to freshEntries.count do (
+				if (freshEntries[rowIndex].displayText != materialEntries[rowIndex].displayText) do hasDisplayChanges = true
+			)
+		)
+		if (not hasDisplayChanges) do (
+			materialEntries = freshEntries
+			return materialEntries
+		)
+		local selectedEntries = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect materialEntries[rowIndex]
+		local listHandle = getListHandle lbxMaterials
+		local topRowIndex = 0
+		local topEntry = undefined
+		if (listHandle != 0) do (
+			topRowIndex = windows.sendMessage listHandle 0x018E 0 0
+			if (topRowIndex >= 0 and topRowIndex < materialEntries.count) do topEntry = materialEntries[topRowIndex + 1]
+		)
+		materialEntries = freshEntries
+		lbxMaterials.items = for materialEntry in materialEntries collect materialEntry.displayText
+		local selectedRows = #{}
+		for rowIndex in 1 to materialEntries.count do (
+			for selectedEntry in selectedEntries do (
+				if (sameMaterialEntry materialEntries[rowIndex] selectedEntry) do selectedRows[rowIndex] = true
+			)
+			if (topEntry != undefined and sameMaterialEntry materialEntries[rowIndex] topEntry) do topRowIndex = rowIndex - 1
+		)
+		lbxMaterials.selection = selectedRows
+		if (listHandle != 0 and materialEntries.count > 0) do (
+			topRowIndex = amax 0 (amin topRowIndex (materialEntries.count - 1))
+			windows.sendMessage listHandle 0x0197 topRowIndex 0
+		)
+		return materialEntries
 	)
 
 	fn refreshLODs selectedLayerNames: undefined = (
@@ -258,12 +428,13 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local hasExplicitSelection = (selectedLayerNames != undefined)
 		if (not hasDisplayChanges and not hasExplicitSelection) do (
 			lodEntries = freshEntries
+			refreshMaterials()
 			return lodEntries
 		)
 		if (selectedLayerNames == undefined) do (
 			selectedLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
 		)
-		local listHandle = getLODListHandle()
+		local listHandle = getListHandle lbxLODs
 		local topRowIndex = 0
 		local topLayerName = undefined
 		if (listHandle != 0) do (
@@ -280,7 +451,44 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			-- LB_SETTOPINDEX restores the same logical top layer when it still exists.
 			windows.sendMessage listHandle 0x0197 topRowIndex 0
 		)
+		refreshMaterials()
 		return lodEntries
+	)
+
+	fn syncSceneSelection = (
+		local selectedHandles = for sceneNode in selection where (isValidNode sceneNode) collect sceneNode.handle
+		sort selectedHandles
+		local currentSignature = #()
+		for nodeHandle in selectedHandles do (
+			local sceneNode = maxOps.getNodeByHandle nodeHandle
+			if (isValidNode sceneNode) do append currentSignature #(nodeHandle, sceneNode.layer.name)
+		)
+		local hasSelectionChanges = (previousSceneSelection == undefined)
+		if (not hasSelectionChanges) do (
+			hasSelectionChanges = (currentSignature.count != previousSceneSelection.count)
+			if (not hasSelectionChanges) do (
+				for entryIndex in 1 to currentSignature.count do (
+					if (currentSignature[entryIndex][1] != previousSceneSelection[entryIndex][1] or currentSignature[entryIndex][2] != previousSceneSelection[entryIndex][2]) do hasSelectionChanges = true
+				)
+			)
+		)
+		if (not hasSelectionChanges) do return false
+		previousSceneSelection = currentSignature
+		local selectedLayerNames = #()
+		for selectionEntry in currentSignature do (
+			local sceneLayerName = selectionEntry[2]
+			if ((findString (toLower sceneLayerName) "_lod") != undefined and (findItem selectedLayerNames sceneLayerName) == 0) do append selectedLayerNames sceneLayerName
+		)
+		refreshLODs selectedLayerNames: selectedLayerNames
+		local selectedRows = lbxLODs.selection as array
+		if (selectedRows.count > 0) do (
+			local listHandle = getListHandle lbxLODs
+			if (listHandle != 0) do (
+				-- LB_SETCARETINDEX scrolls only when this selected row is not visible.
+				windows.sendMessage listHandle 0x019E (selectedRows[1] - 1) 0
+			)
+		)
+		return true
 	)
 
 	fn deleteSelectedLODs = (
@@ -353,14 +561,40 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			return false
 		)
 		local targetNode = selectedNodes[1]
+		local sourceLayer = targetNode.layer
+		local sourceLayerName = sourceLayer.name
+		if (sourceLayer == targetLayer) do (
+			messageBox ("The object is already assigned to " + selectedLayerName + ".") title: "Add to LOD" beep: false
+			return false
+		)
 		local layerNodes = #()
 		targetLayer.nodes &layerNodes
-		if (layerNodes.count == 1 and layerNodes[1] == targetNode) do (
-			refreshLODs selectedLayerNames: #(selectedLayerName)
-			return true
-		)
 		if (layerNodes.count > 0) do (
 			messageBox (selectedLayerName + ": already contains another object. Each LOD layer must contain exactly one object.") title: "Add to LOD" beep: false
+			return false
+		)
+		if ((findString (toLower sourceLayerName) "_lod") != undefined) do (
+			local transferMessage = "Move the selected object to another LOD layer.\nSource: " + sourceLayerName + "\nTarget: " + selectedLayerName
+			if (not GCMatterportConfirmTyped transferMessage expectedText: "OK") do return false
+		)
+		-- The modal dialog may allow scene callbacks to run; revalidate captured references.
+		if (not isValidNode targetNode) do (
+			refreshLODs()
+			messageBox "The object no longer exists. Nothing was moved." title: "Add to LOD" beep: false
+			return false
+		)
+		local currentSourceLayer = LayerManager.getLayerFromName sourceLayerName
+		local currentTargetLayer = LayerManager.getLayerFromName selectedLayerName
+		if (currentSourceLayer == undefined or currentTargetLayer == undefined or currentSourceLayer != sourceLayer or currentTargetLayer != targetLayer or targetNode.layer != sourceLayer) do (
+			refreshLODs()
+			messageBox "The object or its layers changed while confirming. Nothing was moved; select the object and LOD again." title: "Add to LOD" beep: false
+			return false
+		)
+		layerNodes = #()
+		currentTargetLayer.nodes &layerNodes
+		if (layerNodes.count > 0) do (
+			refreshLODs()
+			messageBox (selectedLayerName + ": the target layer is no longer empty. Nothing was moved.") title: "Add to LOD" beep: false
 			return false
 		)
 		try (
@@ -376,24 +610,227 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		return true
 	)
 
+	fn assignSelectedLODMaterials = (
+		local selectedRows = lbxLODs.selection as array
+		if (selectedRows.count == 0) do (
+			messageBox "Select one or more LOD layers in the list." title: "Assign Default Materials" beep: false
+			return false
+		)
+		local selectedEntries = #()
+		for rowIndex in selectedRows do (
+			if (rowIndex < 1 or rowIndex > lodEntries.count) do (
+				refreshLODs()
+				messageBox "The LOD list is out of date. Select the layers again." title: "Assign Default Materials" beep: false
+				return false
+			)
+			append selectedEntries lodEntries[rowIndex]
+		)
+		return _rBoilerplateGCMatterportGLBConverter.assignDefaultMaterials selectedEntries
+	)
+
+	on btnAssignDefaultMaterials pressed do assignSelectedLODMaterials()
+
 	on btnAddToLOD pressed do addSelectedObjectToLOD()
+
+	fn openMaterialInSlate rowIndex = (
+		if (rowIndex < 1 or rowIndex > materialEntries.count) do (
+			refreshMaterials()
+			messageBox "This material row is out of date. Select it again." title: "Materials" beep: false
+			return false
+		)
+		local clickedEntry = materialEntries[rowIndex]
+		local freshEntries = GCMatterportGetMaterials #(clickedEntry.layerName)
+		local isCurrentEntry = false
+		for freshEntry in freshEntries do (
+			if (sameMaterialEntry clickedEntry freshEntry) do isCurrentEntry = true
+		)
+		if (not isCurrentEntry) do (
+			refreshMaterials()
+			messageBox "This glTF material is no longer assigned to that LOD slot. The list has been refreshed." title: "Materials" beep: false
+			return false
+		)
+		local parentMaterial = clickedEntry.nodeRef.material
+		if (parentMaterial == undefined or classOf parentMaterial != MultiMaterial or clickedEntry.slotIndex > parentMaterial.materialList.count or parentMaterial.materialList[clickedEntry.slotIndex] != clickedEntry.materialRef) do (
+			refreshMaterials()
+			messageBox "The parent material changed. Select the material again." title: "Materials" beep: false
+			return false
+		)
+		try (
+			sme.Open()
+			local activeViewIndex = sme.activeView
+			if (sme.GetNumViews() == 0) then (
+				activeViewIndex = sme.CreateView "LOD Materials"
+			) else if (activeViewIndex < 1 or activeViewIndex > sme.GetNumViews()) do (
+				activeViewIndex = 1
+			)
+			sme.activeView = activeViewIndex
+			local materialView = sme.GetView activeViewIndex
+			local materialNode = materialView.GetNodeByRef clickedEntry.materialRef
+			if (materialNode == undefined) do (
+				local nodePosition = [0, 0]
+				for nodeIndex in 1 to materialView.GetNumNodes() do (
+					local existingNode = materialView.GetNode nodeIndex
+					local existingPosition = existingNode.position
+					nodePosition.x = amax nodePosition.x (existingPosition.x + 300)
+				)
+				local parentNode = materialView.GetNodeByRef parentMaterial
+				if (parentNode == undefined) do parentNode = materialView.CreateNode parentMaterial &nodePosition
+				if (parentNode == undefined) do throw "Slate could not create the MultiMaterial graph."
+				-- Restore missing children by reference; existing graph nodes are reused.
+				local pendingMaterials = #(parentMaterial)
+				local visitedMaterials = #()
+				local graphIndex = 1
+				while (graphIndex <= pendingMaterials.count) do (
+					local graphMaterial = pendingMaterials[graphIndex]
+					graphIndex += 1
+					if (graphMaterial != undefined and (findItem visitedMaterials graphMaterial) == 0) do (
+						append visitedMaterials graphMaterial
+						if ((materialView.GetNodeByRef graphMaterial) == undefined) do (
+							nodePosition += [-300, 160]
+							materialView.CreateNode graphMaterial &nodePosition
+						)
+						for subIndex in 1 to (getNumSubMtls graphMaterial) do append pendingMaterials (getSubMtl graphMaterial subIndex)
+						for mapIndex in 1 to (getNumSubTexmaps graphMaterial) do append pendingMaterials (getSubTexmap graphMaterial mapIndex)
+					)
+				)
+				materialNode = materialView.GetNodeByRef clickedEntry.materialRef
+				if (materialNode == undefined) do throw "Slate could not show the selected glTF material in the MultiMaterial graph."
+			)
+			materialView.SetSelectedNodes #(clickedEntry.materialRef)
+			sme.SetMtlInParamEditor clickedEntry.materialRef
+			materialView.ZoomExtents type: #selected
+			materialView.SetFocus()
+		) catch (
+			refreshMaterials()
+			messageBox ("Could not open the glTF material in Slate.\n" + (getCurrentException() as string)) title: "Materials" beep: false
+			return false
+		)
+		return true
+	)
+
+	on lbxMaterials doubleClicked rowIndex do openMaterialInSlate rowIndex
+
+
+	fn showClickedLOD rowIndex = (
+		if (rowIndex < 1 or rowIndex > lodEntries.count) do (
+			refreshLODs()
+			messageBox "This LOD row is out of date. Select it again." title: "Show LOD" beep: false
+			return false
+		)
+		local clickedLayerName = lodEntries[rowIndex].layerName
+		local clickedLayer = LayerManager.getLayerFromName clickedLayerName
+		if (clickedLayer == undefined) do (
+			refreshLODs()
+			messageBox "This LOD layer no longer exists. The list has been refreshed." title: "Show LOD" beep: false
+			return false
+		)
+		local allLODEntries = GCMatterportGetData()
+		local lodLayers = for lodEntry in allLODEntries collect (LayerManager.getLayerFromName lodEntry.layerName)
+		if ((findItem lodLayers undefined) != 0 or (findItem lodLayers clickedLayer) == 0) do (
+			refreshLODs()
+			messageBox "The LOD layers changed. Select the layer again." title: "Show LOD" beep: false
+			return false
+		)
+		try (
+			undo "Show clicked Matterport LOD" on (
+				for lodLayer in lodLayers do lodLayer.isHidden = (lodLayer != clickedLayer)
+				local targetNodes = #()
+				clickedLayer.nodes &targetNodes
+				for targetNode in targetNodes where (isValidNode targetNode) do targetNode.isHidden = false
+			)
+			redrawViews()
+			max tool zoomextents all
+		) catch (
+			messageBox ("Could not show the LOD layer.\n" + (getCurrentException() as string)) title: "Show LOD" beep: false
+			return false
+		)
+		return true
+	)
+
+	on lbxLODs doubleClicked rowIndex do showClickedLOD rowIndex
+
+	on lbxLODs selected rowIndex do refreshMaterials()
 
 	on btnRefresList pressed do refreshLODs()
 	on tmrLODRefresh tick do (
-		try (refreshLODs()) catch (
+		try (
+			if (not syncSceneSelection()) do refreshLODs()
+		) catch (
 			tmrLODRefresh.active = false
 			format "LOD list auto-refresh stopped: %\n" (getCurrentException())
 		)
 	)
 
 	on _rExportGCMatterportGLBConverter open do (
-		refreshLODs()
+		previousSceneSelection = undefined
+		syncSceneSelection()
 		tmrLODRefresh.active = true
 	)
 
 	on _rExportGCMatterportGLBConverter close do (
 		tmrLODRefresh.active = false
+		previousSceneSelection = undefined
 	)
+)
+
+
+rollout _rTransformationGCMatterportGLBConverter "Transformation" category: 3 (
+	group "Set Pivot" (
+		button btnPivotBottom "Bottom" width: 100 across: 3
+		button btnPivotCenter "Center" width: 100
+		button btnPivotTop "Top" width: 100
+	)
+	button btnMoveToCenter "Move to Center Scene" width: 310 align: #center
+
+	fn transformSelectedObjects operationMode = (
+		local selectedNodes = for sceneNode in selection where (isValidNode sceneNode) collect sceneNode
+		if (selectedNodes.count == 0) do (
+			messageBox "Select one or more scene objects first." title: "Transformation" beep: false
+			return false
+		)
+		local hierarchyEntries = for sceneNode in selectedNodes collect (
+			local nodeDepth = 0
+			local ancestorNode = sceneNode.parent
+			while (ancestorNode != undefined) do (
+				nodeDepth += 1
+				ancestorNode = ancestorNode.parent
+			)
+			#(nodeDepth, sceneNode)
+		)
+		fn compareDepth firstEntry secondEntry = (
+			return firstEntry[1] - secondEntry[1]
+		)
+		qsort hierarchyEntries compareDepth
+		selectedNodes = for hierarchyEntry in hierarchyEntries collect hierarchyEntry[2]
+		-- Capture world targets before moving parents, then apply parents before children.
+		local targetPoints = for sceneNode in selectedNodes collect (
+			local worldBounds = nodeGetBoundingBox sceneNode (matrix3 1)
+			local boundsCenter = (worldBounds[1] + worldBounds[2]) * 0.5
+			case operationMode of (
+				#bottom: [boundsCenter.x, boundsCenter.y, worldBounds[1].z]
+				#top: [boundsCenter.x, boundsCenter.y, worldBounds[2].z]
+				#center: boundsCenter
+				#move: ((in coordsys world sceneNode.pos) + [-boundsCenter.x, -boundsCenter.y, -worldBounds[1].z])
+			)
+		)
+		undo "Transform Matterport selection" on (
+			for nodeIndex in 1 to selectedNodes.count do (
+				local sceneNode = selectedNodes[nodeIndex]
+				if (operationMode == #move) then (
+					in coordsys world sceneNode.pos = targetPoints[nodeIndex]
+				) else (
+					in coordsys world sceneNode.pivot = targetPoints[nodeIndex]
+				)
+			)
+		)
+		redrawViews()
+		return true
+	)
+
+	on btnPivotBottom pressed do transformSelectedObjects #bottom
+	on btnPivotCenter pressed do transformSelectedObjects #center
+	on btnPivotTop pressed do transformSelectedObjects #top
+	on btnMoveToCenter pressed do transformSelectedObjects #move
 )
 
 rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
@@ -562,8 +999,9 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 )
 
 (
-local lodsReadyAtStartup = GCMatterportLODsReady()
-addRollout _rBoilerplateGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: lodsReadyAtStartup 
-addRollout _rExportGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: (not lodsReadyAtStartup) 
+local hasLODsAtStartup = ((GCMatterportGetData()).count > 0)
+addRollout _rBoilerplateGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: hasLODsAtStartup
+addRollout _rExportGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: (not hasLODsAtStartup)
+addRollout _rTransformationGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true
 addRollout _rAboutGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true 
 )
