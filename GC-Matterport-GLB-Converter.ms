@@ -18,6 +18,7 @@ Script for proper conversion model to GLB=
 */
 
 
+try(destroyDialog GCMatterportLiveRollout) catch()
 try(closeRolloutFloater floaterGCMatterportGLBConverter) catch()
 global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 580
 
@@ -1156,8 +1157,17 @@ fn GCMatterportEnsurePreviewServer viewerFolder = (
 )
 
 
+
+fn GCMatterportLiveBrowserScript = (
+ return "(() => {\n const token=new URLSearchParams(location.search).get('live');\n if(!token || !/^[a-f0-9]{32}$/.test(token)) return;\n const viewer=document.querySelector('model-viewer'), root=new URL('/live/'+token+'/',location.href);\n const status=document.createElement('div'); status.id='gc-live-status';\n Object.assign(status.style,{position:'fixed',bottom:'12px',left:'12px',zIndex:10,padding:'9px 13px',background:'#20252de8',color:'#fff',font:'13px sans-serif',maxWidth:'85vw',pointerEvents:'none'});\n status.textContent='Google Live Preview: loading…';document.body.append(status);\n let revision=0, appliedTimestamp=null, busy=false, state={}, templates=null, retryAt=0, applyCount=0, closed=false;\n const instances=new Map(), imageCache=new Map(), textureCache=new Map();\n const privateValue=(object,description)=>{\n  for(let prototype=object;prototype;prototype=Object.getPrototypeOf(prototype)) {\n   const symbol=Object.getOwnPropertySymbols(prototype).find(symbol=>symbol.description===description);\n   if(symbol) return object[symbol];\n  }\n };\n const show=(message,error=false)=>{status.textContent=message;status.style.color=error?'#ffb4a9':'#fff';};\n const bindKey=mesh=>{for(let node=mesh;node;node=node.parent) if(/^GC_Live_ID_\\d+$/.test(node.name)) return node.name;return null;};\n const descriptorKey=descriptor=>JSON.stringify(descriptor);\n const transformKey=descriptor=>descriptor?JSON.stringify([descriptor.uv,descriptor.tiling,descriptor.offset,descriptor.rotation,descriptor.wrap]):'none';\n function localURL(relative) {\n  const url=new URL(relative,root);\n  if(url.origin!==location.origin || !url.pathname.startsWith(root.pathname)) throw new Error('Invalid local texture URL.');\n  return url.href;\n }\n async function imageData(descriptor) {\n  const url=localURL(descriptor.url);\n  if(!imageCache.has(url)) imageCache.set(url,(async()=>{\n   const wrapped=await viewer.createTexture(url);\n   const raw=[...(privateValue(wrapped,'correlatedObjects')||[])].find(texture=>texture.isTexture);\n   if(!raw) throw new Error('The installed Google texture API is incompatible. Restore the bundled viewer.');\n   const source=raw.image, canvas=document.createElement('canvas');canvas.width=source.width;canvas.height=source.height;\n   const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(source,0,0);\n   return {raw,canvas,pixels:context.getImageData(0,0,canvas.width,canvas.height)};\n  })());\n  try{return await imageCache.get(url);}catch(error){imageCache.delete(url);throw error;}\n }\n function configure(texture,descriptor,data) {\n  texture.colorSpace=data?'':'srgb';texture.flipY=false;\n  texture.channel=descriptor.uv;\n  const angle=descriptor.rotation*Math.PI/180, [u,v]=descriptor.tiling,[x,y]=descriptor.offset;\n  texture.offset.set(x+.5-.5*(u*Math.cos(angle)+v*Math.sin(angle)),-y+.5-.5*(v*Math.cos(angle)-u*Math.sin(angle)));\n  texture.repeat.set(u,v);texture.center.set(0,0);texture.rotation=angle;\n  texture.wrapS=descriptor.wrap[0];texture.wrapT=descriptor.wrap[1];texture.updateMatrix();texture.needsUpdate=true;\n  return texture;\n }\n async function textureFor(descriptor,role,used) {\n  if(!descriptor) return null;\n  const key=role+':'+descriptorKey(descriptor);used.add(key);\n  if(!textureCache.has(key)) {\n   const image=await imageData(descriptor);let texture=image.raw.clone();texture.source=new image.raw.source.constructor(image.raw.image);\n   if(role==='scalar') {\n    const canvas=document.createElement('canvas');canvas.width=image.canvas.width;canvas.height=image.canvas.height;\n    const context=canvas.getContext('2d'), pixels=new ImageData(new Uint8ClampedArray(image.pixels.data),canvas.width,canvas.height);\n    for(let i=0;i<pixels.data.length;i+=4){const value=Math.max(pixels.data[i],pixels.data[i+1],pixels.data[i+2]);pixels.data[i]=pixels.data[i+1]=pixels.data[i+2]=pixels.data[i+3]=value;}\n    context.putImageData(pixels,0,0);texture.image=canvas;\n   }\n   textureCache.set(key,configure(texture,descriptor,role!=='color'));\n  }\n  return textureCache.get(key);\n }\n async function metallicRoughness(rough,metal,used) {\n  if(!rough&&!metal) return [null,null];\n  // Distinct UV transforms cannot share a packed texture. Google's Three material\n  // supports separate roughnessMap / metalnessMap, preserving both exactly.\n  if(rough&&metal&&transformKey(rough)!==transformKey(metal)) return [await textureFor(rough,'scalar',used),await textureFor(metal,'scalar',used)];\n  const key='mr:'+descriptorKey([rough,metal]);used.add(key);\n  if(!textureCache.has(key)) {\n   const roughImage=rough?await imageData(rough):null, metalImage=metal?await imageData(metal):null;\n   const width=Math.max(roughImage?.canvas.width||1,metalImage?.canvas.width||1),height=Math.max(roughImage?.canvas.height||1,metalImage?.canvas.height||1);\n   const read=image=>{\n    if(!image)return null;\n    if(image.canvas.width===width&&image.canvas.height===height)return image.pixels.data;\n    const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;\n    const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(image.canvas,0,0,width,height);return context.getImageData(0,0,width,height).data;\n   };\n   const r=read(roughImage),m=read(metalImage),canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;\n   const context=canvas.getContext('2d'), pixels=context.createImageData(width,height);\n   for(let i=0;i<pixels.data.length;i+=4){pixels.data[i]=255;pixels.data[i+1]=r?Math.max(r[i],r[i+1],r[i+2]):255;pixels.data[i+2]=m?Math.max(m[i],m[i+1],m[i+2]):255;pixels.data[i+3]=255;}\n   context.putImageData(pixels,0,0);\n   const basis=(roughImage||metalImage).raw;const texture=basis.clone();texture.source=new basis.source.constructor(canvas);\n   textureCache.set(key,configure(texture,rough||metal,true));\n  }\n  const texture=textureCache.get(key);return [rough?texture:null,metal?texture:null];\n }\n const mapSlots={basecolormap:['map','color'],alphamap:['alphaMap','scalar'],normalmap:['normalMap','normal'],ambientocclusionmap:['aoMap','scalar'],emissionmap:['emissiveMap','color'],clearcoatmap:['clearcoatMap','scalar'],clearcoatroughnessmap:['clearcoatRoughnessMap','scalar'],clearcoatnormalmap:['clearcoatNormalMap','normal'],sheencolormap:['sheenColorMap','color'],sheenroughnessmap:['sheenRoughnessMap','scalar'],specularmap:['specularIntensityMap','scalar'],specularcolormap:['specularColorMap','color'],transmissionmap:['transmissionMap','scalar'],volumethicknessmap:['thicknessMap','scalar']};\n const setColor=(target,rgb)=>target?.setRGB(...rgb);\n async function prepareMaterial(key,data,used) {\n  const maps={};\n  for(const [field,[property,role]] of Object.entries(mapSlots)) maps[property]=await textureFor(data[field],role,used);\n  const [roughnessMap,metalnessMap]=await metallicRoughness(data.roughnessmap,data.metalnessmap,used);maps.roughnessMap=roughnessMap;maps.metalnessMap=metalnessMap;\n  let pair=instances.get(key);\n  if(!pair){pair={lit:templates[0].clone(),unlit:templates[1].clone()};instances.set(key,pair);}\n  const material=data.unlit?pair.unlit:pair.lit;\n  return {material,maps,apply(){\n   setColor(material.color,data.basecolor);setColor(material.emissive,data.emissioncolor);\n   material.metalness=data.metalness;material.roughness=data.roughness;\n   material.normalScale?.set(data.normal,data.normal);material.aoMapIntensity=data.ambientocclusion;\n   material.side=data.doublesided?2:0;material.transparent=data.alphamode===3;material.depthWrite=!material.transparent;material.alphaTest=data.alphamode===2?data.alphacutoff:0;material.opacity=1;\n   material.clearcoat=data.enableclearcoat?data.clearcoat:0;material.clearcoatRoughness=data.clearcoatroughness;material.clearcoatNormalScale?.set(data.clearcoatnormal,data.clearcoatnormal);\n   material.sheen=data.enablesheen?1:0;setColor(material.sheenColor,data.sheencolor);material.sheenRoughness=data.sheenroughness;\n   material.specularIntensity=data.enablespecular?data.specular:1;setColor(material.specularColor,data.enablespecular?data.specularcolor:[1,1,1]);\n   material.transmission=data.enabletransmission?data.transmission:0;material.ior=data.enableindexofrefraction?data.indexofrefraction:1.5;\n   material.thickness=data.enablevolume?data.volumethickness:0;material.attenuationDistance=data.enablevolume&&data.volumedistance>0?data.volumedistance:Infinity;setColor(material.attenuationColor,data.enablevolume?data.volumecolor:[1,1,1]);\n   Object.assign(material,maps);if(!data.aoEnabled)material.aoMap=null;material.needsUpdate=true;\n  }};\n }\n async function readJSON(relative) {const response=await fetch(new URL(relative,root),{cache:'no-store'});if(!response.ok)throw new Error('Local sync file unavailable: '+relative);return response.json();}\n async function poll() {\n  if(closed||busy||!viewer?.loaded||performance.now()<retryAt)return;\n  busy=true;\n  try {\n   const manifest=await readJSON('manifest.json');\n   if(manifest.session!==token)throw new Error('Preview session mismatch.');\n   if(manifest.closed){closed=true;show('Google Live Preview: sync stopped. Reopen from Max to start a new session.');return;}\n   if(manifest.timestamp===appliedTimestamp)return;\n   const scene=privateValue(viewer,'scene'),renderer=privateValue(viewer,'renderer'),loader=privateValue(renderer?.loader,'loader');\n   if(!scene?.model?.traverse||!scene.queueRender||!loader?.parse)throw new Error('Google Live Preview adapter is incompatible with this viewer build.');\n   if(!templates) {\n    const gltf={asset:{version:'2.0'},nodes:[],scenes:[{nodes:[]}],scene:0,materials:[{extensions:{KHR_materials_clearcoat:{clearcoatFactor:0}}},{extensions:{KHR_materials_unlit:{}}}],extensionsUsed:['KHR_materials_clearcoat','KHR_materials_unlit']};\n    const parsed=await new Promise((resolve,reject)=>loader.parse(gltf,root.href,resolve,reject));templates=await parsed.parser.getDependencies('material');\n   }\n   let nextState=structuredClone(state),nextRevision=manifest.revision,nextTimestamp=manifest.timestamp;\n   if(revision===0){const initial=await readJSON('state.json');nextState=initial.materials;nextRevision=initial.revision;nextTimestamp=initial.timestamp;}\n   else for(let r=revision+1;r<=manifest.revision;r++){const patch=await readJSON('updates/'+r+'.json');for(const [key,changes] of Object.entries(patch.changes))Object.assign(nextState[key],changes);}\n   const targets=[];scene.model.traverse(mesh=>{\n    if(!mesh.isMesh)return;const key=bindKey(mesh);if(!nextState[key])throw new Error('Source Material ID binding changed. Reopen Live Preview.');\n    for(const descriptor of Object.values(nextState[key]))if(descriptor?.url){const attribute=descriptor.uv===0?'uv':'uv'+descriptor.uv;if(!mesh.geometry.attributes[attribute])throw new Error('Required UV channel is absent. Reopen after adding UVs.');}\n    targets.push({mesh,key});\n   });\n   if(new Set(targets.map(target=>target.key)).size!==Object.keys(nextState).length)throw new Error('Source ID layout changed. Reopen Live Preview.');\n   const used=new Set(),prepared=new Map();\n   for(const [key,data] of Object.entries(nextState))prepared.set(key,await prepareMaterial(key,data,used));\n   // Never let an older asynchronous texture merge overwrite a newer change.\n   const latest=await readJSON('manifest.json');if(latest.timestamp!==nextTimestamp){\n    const activeTextures=new Set([...instances.values()].flatMap(pair=>[pair.lit,pair.unlit]).flatMap(material=>Object.values(material).filter(value=>value?.isTexture)));\n    for(const [key,texture] of textureCache)if(!used.has(key)&&!activeTextures.has(texture)){texture.dispose();textureCache.delete(key);}\n    return;\n   }\n   const before=JSON.stringify([viewer.getCameraOrbit(),viewer.getCameraTarget()]),geometries=targets.map(target=>target.mesh.geometry);\n   for(const preparedMaterial of prepared.values())preparedMaterial.apply();\n   for(const target of targets){const material=prepared.get(target.key).material;material.envMap=target.mesh.material.envMap;material.vertexColors=target.mesh.material.vertexColors;target.mesh.material=material;}\n   scene.queueShadowRender();scene.queueRender();revision=nextRevision;appliedTimestamp=nextTimestamp;state=nextState;applyCount++;\n   for(const [key,texture] of textureCache)if(!used.has(key)){texture.dispose();textureCache.delete(key);}\n   const activeURLs=new Set(Object.values(state).flatMap(material=>Object.values(material).filter(value=>value?.url).map(value=>localURL(value.url))));\n   for(const [url,promise] of imageCache)if(!activeURLs.has(url)){promise.then(image=>image.raw.dispose());imageCache.delete(url);}\n   status.dataset.check=JSON.stringify({revision,timestamp:appliedTimestamp,applyCount,viewer:'google-model-viewer',cameraPreserved:before===JSON.stringify([viewer.getCameraOrbit(),viewer.getCameraTarget()]),geometryPreserved:targets.every((target,index)=>target.mesh.geometry===geometries[index]),bindings:targets.map(target=>({key:target.key,geometry:target.mesh.geometry.uuid,color:target.mesh.material.color.toArray(),roughness:target.mesh.material.roughness,metalness:target.mesh.material.metalness,thickness:target.mesh.material.thickness,attenuationDistance:target.mesh.material.attenuationDistance,attenuationColor:target.mesh.material.attenuationColor?.toArray(),thicknessMap:!!target.mesh.material.thicknessMap,ao:!!target.mesh.material.aoMap,roughMap:!!target.mesh.material.roughnessMap,metalMap:!!target.mesh.material.metalnessMap,packed:!!target.mesh.material.roughnessMap&&target.mesh.material.roughnessMap===target.mesh.material.metalnessMap,metalPixel:target.mesh.material.metalnessMap?.image?.getContext?Array.from(target.mesh.material.metalnessMap.image.getContext('2d').getImageData(0,0,1,1).data):null,mrPixel:target.mesh.material.roughnessMap?.image?.getContext?Array.from(target.mesh.material.roughnessMap.image.getContext('2d').getImageData(0,0,1,1).data):null}))});\n   show('Google Live Preview · auto sync · revision '+revision);\n  } catch(error){if(error.message.includes('updates/')||error.message.includes('texture'))revision=0;show('Live Preview: '+error.message,true);retryAt=performance.now()+1500;}\n  finally{busy=false;}\n }\n setInterval(poll,150);poll();\n})();"
+)
+
+fn GCMatterportGoogleViewerHTML = (
+ return "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Google Model Viewer</title><link rel=\"icon\" href=\"/favicon-16x16.png\">\n<style>html,body{padding:0;margin:0;background:#f7f7f7}model-viewer{width:100vw;height:100vh}#error{position:fixed;top:16px;left:16px;right:16px;padding:12px;background:white;color:#900;font:14px sans-serif}</style>\n</head><body>\n<model-viewer alt=\"\" shadow-intensity=\"1\" camera-controls environment-image=\"hdri/studio.hdr\" camera-orbit=\"-36deg 72deg\" field-of-view=\"30deg\" exposure=\"0.4\" tone-mapping=\"aces\" min-field-of-view=\"50deg\" max-field-of-view=\"50deg\" touch-action=\"pan-y\"></model-viewer>\n<div id=\"error\" hidden></div>\n<script type=\"module\">\nconst errorBox=document.querySelector('#error');\nconst reportError=message=>{errorBox.textContent=message;errorBox.hidden=false;};\ntry {\n const response=await fetch('/js/engine.js');\n if(!response.ok) throw new Error('Cannot load Model Viewer engine: '+response.status);\n const engineURL=URL.createObjectURL(new Blob([await response.text()],{type:'application/javascript'}));\n try {await import(engineURL);} finally {URL.revokeObjectURL(engineURL);}\n customElements.get('model-viewer').ktx2TranscoderLocation='/js/basis/';\n const parameters=new URLSearchParams(location.search), model=parameters.get('model'), live=parameters.get('live');\n const viewer=document.querySelector('model-viewer');\n document.title=(parameters.get('title')||'Model Viewer')+' - Google Model Viewer';\n viewer.alt=document.title;window.devicePixelRatio=2;\n viewer.addEventListener('error',()=>reportError('The exported GLB could not be loaded.'));\n if(live && /^[a-f0-9]{32}$/.test(live)) viewer.src='/live/'+live+'/geometry/scene.glb';\n else if(model && /^[a-f0-9]{64}$/.test(model)) viewer.src='/models/'+model+'.glb?v='+encodeURIComponent(parameters.get('v')||'');\n else throw new Error('A valid exported LOD or Live Preview session is required.');\n} catch(error) {reportError(error.message||'Model Viewer could not start.');}\n</script><script src=\"/js/live-sync.js\"></script>\n</body></html>\n"
+)
+
 fn GCMatterportViewerFiles = (
-	return #("index.html", "js\\engine.js", "js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm", "hdri\\studio.hdr", "localhost.exe", "mime.types", "favicon-16x16.png")
+	return #("js\\live-sync.js", "index.html", "js\\engine.js", "js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm", "hdri\\studio.hdr", "localhost.exe", "mime.types", "favicon-16x16.png")
 )
 
 fn GCMatterportViewerIsInstalled viewerFolder = (
@@ -1191,7 +1201,8 @@ fn GCMatterportPrepareViewer stageRoot = (
 		GCMatterportDownloadFile (decoderMatch.Value + decoderName) (stageRoot + "\\js\\basis\\" + decoderName)
 	)
 	local utf8 = dotNetObject "System.Text.UTF8Encoding" false
-	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\index.html") "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Model Viewer</title>\n<link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/favicon-16x16.png\">\n<style>\nhtml, body { padding: 0; margin: 0; background: #f7f7f7; }\nmodel-viewer { width: 100vw; height: 100vh; }\n#error { position: fixed; top: 16px; left: 16px; right: 16px; padding: 12px; background: white; color: #900; font: 14px sans-serif; }\n</style>\n</head>\n<body>\n<model-viewer alt=\"\" shadow-intensity=\"1\" camera-controls\n environment-image=\"hdri/studio.hdr\" camera-orbit=\"-36deg 72deg\" field-of-view=\"30deg\"\n exposure=\"0.4\" tone-mapping=\"aces\" min-field-of-view=\"50deg\"\n max-field-of-view=\"50deg\" touch-action=\"pan-y\"></model-viewer>\n<div id=\"error\" hidden></div>\n<script type=\"module\">\nconst errorBox = document.querySelector('#error');\nconst reportError = message => { errorBox.textContent = message; errorBox.hidden = false; };\ntry {\n    const engineResponse = await fetch('/js/engine.js');\n    if (!engineResponse.ok) throw new Error('Cannot load Model Viewer engine: ' + engineResponse.status);\n    const engineURL = URL.createObjectURL(new Blob([await engineResponse.text()], { type: 'application/javascript' }));\n    try { await import(engineURL); } finally { URL.revokeObjectURL(engineURL); }\n    const viewerClass = customElements.get('model-viewer');\n    viewerClass.ktx2TranscoderLocation = '/js/basis/';\n    const parameters = new URLSearchParams(location.search);\n    const model = parameters.get('model');\n    if (!model || !/^[a-f0-9]{64}$/.test(model)) throw new Error('A valid exported LOD is required.');\n    const viewer = document.querySelector('model-viewer');\n    document.title = parameters.get('title') || 'Model Viewer';\n    viewer.alt = document.title;\n    window.devicePixelRatio = 2;\n    viewer.addEventListener('error', () => reportError('The exported GLB could not be loaded.'));\n    viewer.src = '/models/' + encodeURIComponent(model) + '.glb?v=' + encodeURIComponent(parameters.get('v') || '');\n} catch (error) {\n    reportError(error.message || 'Model Viewer could not start.');\n}\n</script>\n</body>\n</html>\n" utf8
+	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\index.html") (GCMatterportGoogleViewerHTML()) utf8
+	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\js\\live-sync.js") (GCMatterportLiveBrowserScript()) utf8
 	(dotNetClass "System.IO.File").WriteAllText (stageRoot + "\\mime.types") "application/javascript js\napplication/wasm wasm\nmodel/gltf-binary glb\nimage/vnd.radiance hdr\ntext/html html\ntext/plain txt\nimage/png png\n" utf8
 	return true
 )
@@ -1209,7 +1220,7 @@ fn GCMatterportInstallViewerArchive archivePath prepareOriginal:false normalized
 		makeDir stageRoot all:true
 		archive = (dotNetClass "System.IO.Compression.ZipFile").OpenRead archivePath
 		-- Extract only the known runtime paths; archive paths never determine destinations.
-		for relativeFile in GCMatterportViewerFiles() where (not prepareOriginal or (findItem #("js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm") relativeFile) == 0) do (
+		for relativeFile in GCMatterportViewerFiles() where (not prepareOriginal or (findItem #("js\\live-sync.js", "js\\basis\\basis_transcoder.js", "js\\basis\\basis_transcoder.wasm") relativeFile) == 0) do (
 			local entry = archive.GetEntry (substituteString relativeFile "\\" "/")
 			if (entry == undefined or entry.Length == 0) do throw ("Viewer archive is missing: " + relativeFile)
 			local destination = stageRoot + "\\" + relativeFile
@@ -1471,6 +1482,504 @@ fn GCMatterportPreviewPCLOD layerName openBrowser: true = (
 )
 
 
+
+-- Manual material preview. Native glTF serializes materials; geometry is loaded once.
+struct GCMatterportLiveSessionData (token, layerName, nodeRef, geometrySignature, materialIDs, folderPath, materialLayout, textureCache = #(), lastState = #(), lastTextureCheck = 0, revision = 0)
+struct GCMatterportLiveTextureData (sourcePath, stamp, observedStamp, url)
+global GCMatterportLiveObserved
+global GCMatterportLivePendingAt
+global GCMatterportLiveBusy = false
+global GCMatterportLiveGeometryDirty = false
+global GCMatterportLiveSession
+
+fn GCMatterportLiveJSONQuote stringValue = (
+ local escaped = substituteString (stringValue as string) "\\" "\\\\"
+ escaped = substituteString escaped "\"" "\\\""
+ escaped = substituteString escaped "\r" "\\r"
+ escaped = substituteString escaped "\n" "\\n"
+ escaped = substituteString escaped "\t" "\\t"
+ return ("\"" + escaped + "\"")
+)
+
+fn GCMatterportLiveWrite filePath content = (
+ (dotNetClass "System.IO.File").WriteAllText filePath content (dotNetObject "System.Text.UTF8Encoding" false)
+ return true
+)
+
+fn GCMatterportLiveHashFile filePath = (
+ local inputStream = (dotNetClass "System.IO.File").OpenRead filePath
+ local hasher = (dotNetClass "System.Security.Cryptography.SHA256").Create()
+ local checksum = undefined
+ try (checksum = hasher.ComputeHash inputStream) catch (
+  inputStream.Dispose()
+  hasher.Dispose()
+  throw()
+ )
+ inputStream.Dispose()
+ hasher.Dispose()
+ return toLower (substituteString ((dotNetClass "System.BitConverter").ToString checksum) "-" "")
+)
+
+fn GCMatterportLivePointBits pointValue = (
+ return ((bit.floatAsInt pointValue.x) as string) + "," + ((bit.floatAsInt pointValue.y) as string) + "," + ((bit.floatAsInt pointValue.z) as string)
+)
+
+fn GCMatterportLiveGeometrySignature sceneNode = (
+ local sourceMesh = snapshotAsMesh sceneNode
+ local fingerprint = stringStream ""
+ try (
+  format "%|%|%|" sceneNode.handle sourceMesh.numverts sourceMesh.numfaces to: fingerprint
+  for rowIndex in 1 to 4 do format "%;" (GCMatterportLivePointBits sceneNode.transform[rowIndex]) to: fingerprint
+  for vertexIndex in 1 to sourceMesh.numverts do format "%:%;" (GCMatterportLivePointBits (getVert sourceMesh vertexIndex)) (GCMatterportLivePointBits (getNormal sourceMesh vertexIndex)) to: fingerprint
+  for faceIndex in 1 to sourceMesh.numfaces do format "%:%:%;" (getFace sourceMesh faceIndex) (getFaceMatID sourceMesh faceIndex) (getFaceSmoothGroup sourceMesh faceIndex) to: fingerprint
+  for channelIndex in #(1, 2) do (
+   local supported = (channelIndex < meshop.getNumMaps sourceMesh and meshop.getMapSupport sourceMesh channelIndex)
+   format "|%:%|" channelIndex supported to: fingerprint
+   if supported do (
+    for vertexIndex in 1 to (meshop.getNumMapVerts sourceMesh channelIndex) do format "%;" (GCMatterportLivePointBits (meshop.getMapVert sourceMesh channelIndex vertexIndex)) to: fingerprint
+    for faceIndex in 1 to (meshop.getNumMapFaces sourceMesh channelIndex) do format "%;" (meshop.getMapFace sourceMesh channelIndex faceIndex) to: fingerprint
+   )
+  )
+ ) catch (delete sourceMesh; close fingerprint; throw())
+ delete sourceMesh
+ local result = GCMatterportFileKey (fingerprint as string)
+ close fingerprint
+ return result
+)
+
+fn GCMatterportLiveEntries layerName = (
+ local entries = GCMatterportGetMaterials #(layerName)
+ if (entries.count == 0) do throw "Select one LOD with glTF materials."
+ local sourceNode = entries[1].nodeRef
+ local sourceMesh = snapshotAsMesh sourceNode
+ local usedIDs = #()
+ for faceIndex in 1 to sourceMesh.numfaces do appendIfUnique usedIDs (getFaceMatID sourceMesh faceIndex)
+ delete sourceMesh
+ local activeEntries = #()
+ for materialID in usedIDs do (
+  local matches = for entry in entries where entry.materialID == materialID collect entry
+  if (matches.count != 1 or not GCMatterportIsCurrentMaterialEntry matches[1]) do throw "Every used face ID must have exactly one current glTF material."
+  append activeEntries matches[1]
+ )
+ if (activeEntries.count == 0) do throw "The selected LOD contains no faces."
+ return activeEntries
+)
+
+fn GCMatterportLiveCheckMaps materialRef = (
+ for propertyName in getPropNames materialRef where (matchPattern (propertyName as string) pattern: "*Map" ignoreCase: true) do (
+  local textureMap = getProperty materialRef propertyName
+  if (textureMap != undefined) do (
+   if (classOf textureMap != Bitmaptexture) do throw ("Live Preview supports file Bitmap maps only: " + (propertyName as string) + ". Bake procedural maps explicitly first.")
+   if (textureMap.coords.mappingType != 0 or textureMap.coords.realWorldScale or textureMap.coords.Noise_On) do throw ("Live Preview requires explicit UV mapping without Real-World Scale or UV noise: " + (propertyName as string))
+   if ((findItem #(1, 2) textureMap.coords.mapChannel) == 0) do throw "Live Preview supports UV channels 1 and 2. Other channels require a new preview implementation."
+   local resolved = mapPaths.getFullFilePath textureMap.filename
+   if (resolved == undefined or resolved == "" or not doesFileExist resolved) do throw ("Missing Live Preview texture: " + textureMap.filename)
+  )
+ )
+ return true
+)
+
+fn GCMatterportLiveExportGeometry sessionData entries outputFolder = (
+ local originalSelection = selection as array
+ local originalPanel = getCommandPanelTaskMode()
+ local originalStack = modPanel.getCurrentObject()
+ local originalLevel = subObjectLevel
+ local temporaryNodes = #()
+ local temporaryLayer = undefined
+ local failureReason = undefined
+ local gltfPath = outputFolder + "scene.gltf"
+ makeDir (outputFolder + "maps\\") all: true
+ try (
+  subObjectLevel = 0
+  setCommandPanelTaskMode mode: #create
+  with undo off (
+   temporaryLayer = LayerManager.newLayerFromName ("GC_Live_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N"))
+   for entry in entries do (
+    local copyMaterial = copy entry.materialRef
+    local aoEnabled = GCMatterportSceneProperties.getValue ((GCMatterportAOKey entry) + "enabled") true
+    if (not aoEnabled) do copyMaterial.ambientOcclusionMap = undefined
+    GCMatterportLiveCheckMaps copyMaterial
+    local previewNode = undefined
+    (
+     previewNode = copy entry.nodeRef
+     append temporaryNodes previewNode
+     local worldTransform = previewNode.transform
+     previewNode.parent = undefined
+     previewNode.transform = worldTransform
+     convertToMesh previewNode
+     local discardFaces = #{}
+     for faceIndex in 1 to previewNode.numfaces where (getFaceMatID previewNode faceIndex != entry.materialID) do discardFaces[faceIndex] = true
+     meshop.deleteFaces previewNode discardFaces delIsoVerts: true
+     -- Keep both available UV streams even when the starting material does not use them.
+     if (copyMaterial.baseColorMap == undefined and meshop.getMapSupport previewNode 1) do (
+      copyMaterial.baseColorMap = Bitmaptexture filename: (sessionData.folderPath + "white.png")
+      copyMaterial.baseColorMap.coords.mapChannel = 1
+     )
+     if (copyMaterial.ambientOcclusionMap == undefined and meshop.getNumMaps previewNode > 2 and meshop.getMapSupport previewNode 2) do (
+      copyMaterial.ambientOcclusionMap = Bitmaptexture filename: (sessionData.folderPath + "white.png")
+      copyMaterial.ambientOcclusionMap.coords.mapChannel = 2
+     )
+    )
+    previewNode.name = "GC_Live_ID_" + (entry.materialID as string)
+    copyMaterial.name = previewNode.name
+    for faceIndex in 1 to previewNode.numfaces do setFaceMatID previewNode faceIndex 1
+    previewNode.material = copyMaterial
+    temporaryLayer.addNode previewNode
+    previewNode.isHidden = false
+    previewNode.isFrozen = false
+    local bitmapMaps = getClassInstances Bitmaptexture target: copyMaterial
+    for mapIndex in 1 to bitmapMaps.count do (
+     local sourceMap = bitmapMaps[mapIndex]
+     local sourceImage = mapPaths.getFullFilePath sourceMap.filename
+     local destination = outputFolder + "maps\\" + (entry.materialID as string) + "_" + (mapIndex as string) + (getFilenameType sourceImage)
+     if (not copyFile sourceImage destination) do throw ("Could not stage Live Preview image: " + sourceImage)
+     sourceMap.filename = destination
+    )
+   )
+   select temporaryNodes
+   if (not exportFile gltfPath #noPrompt selectedOnly: true using: GLTF_Export) do throw "Live Preview native material export failed."
+  )
+ ) catch (failureReason = getCurrentException() as string)
+ with undo off (
+  for previewNode in temporaryNodes where isValidNode previewNode do delete previewNode
+  if temporaryLayer != undefined do LayerManager.deleteLayerByName temporaryLayer.name
+  select (for originalNode in originalSelection where isValidNode originalNode collect originalNode)
+  setCommandPanelTaskMode mode: originalPanel
+  if (originalPanel == #modify and originalStack != undefined) do modPanel.setCurrentObject originalStack
+  subObjectLevel = originalLevel
+ )
+ if failureReason != undefined do throw failureReason
+ return gltfPath
+)
+
+
+fn GCMatterportLiveNumber numericValue = (
+ return substituteString (formattedPrint (numericValue as float) format: ".9g") "," "."
+)
+
+fn GCMatterportLiveColor colorValue = (
+ return "[" + (GCMatterportLiveNumber (colorValue.r / 255.0)) + "," + (GCMatterportLiveNumber (colorValue.g / 255.0)) + "," + (GCMatterportLiveNumber (colorValue.b / 255.0)) + "]"
+)
+
+fn GCMatterportLiveTexture sessionData textureMap forceCheck: false stageTextures: true = (
+ if textureMap == undefined do return "null"
+ if classOf textureMap != Bitmaptexture do throw "Live Preview supports file Bitmap maps only. Bake procedural maps explicitly first."
+ local outputSettings = textureMap.output
+ if (outputSettings.invert or outputSettings.enableColorMap or outputSettings.RGB_Level != 1 or outputSettings.output_amount != 1 or outputSettings.RGB_Offset != 0 or textureMap.rgbOutput != 0) do throw "Live Preview requires Bitmap maps without Output color adjustments. Bake these adjustments explicitly first."
+ local coords = textureMap.coords
+ if (coords.mappingType != 0 or coords.realWorldScale or coords.Noise_On or coords.U_Angle != 0 or coords.V_Angle != 0) do throw "Live Preview supports ordinary UV tiling, offset and W rotation; Real-World Scale, UV noise and tilted UVs are unsupported."
+ if findItem #(1, 2) coords.mapChannel == 0 do throw "Live Preview supports existing UV channels 1 and 2."
+ local resolved = mapPaths.getFullFilePath textureMap.filename
+ if (resolved == undefined or resolved == "" or not doesFileExist resolved) do throw ("Missing texture: " + textureMap.filename)
+ local extension = toLower (getFilenameType resolved)
+ if findItem #(".png", ".jpg", ".jpeg", ".webp") extension == 0 do throw ("Live Preview requires PNG, JPEG or WebP textures: " + textureMap.filename)
+ local cacheEntry = undefined
+ for cached in sessionData.textureCache where cached.sourcePath == resolved do cacheEntry = cached
+ if cacheEntry == undefined do (
+  cacheEntry = GCMatterportLiveTextureData sourcePath: resolved
+  append sessionData.textureCache cacheEntry
+ )
+ local inspectFile = (forceCheck or cacheEntry.observedStamp == undefined or timeStamp() - sessionData.lastTextureCheck >= 1000)
+ if inspectFile do (
+  local fileInfo = dotNetObject "System.IO.FileInfo" resolved
+  if fileInfo.Length == 0 do throw ("Texture is empty or being saved: " + resolved)
+  local stamp = (fileInfo.Length as string) + ":" + (fileInfo.LastWriteTimeUtc.Ticks as string)
+  cacheEntry.observedStamp = stamp
+ )
+ if (stageTextures and (cacheEntry.url == undefined or cacheEntry.stamp != cacheEntry.observedStamp or forceCheck)) do (
+   local digest = GCMatterportLiveHashFile resolved
+   local fileName = digest + extension
+   local targetFile = sessionData.folderPath + "textures\\" + fileName
+   if not doesFileExist targetFile do (
+    if not copyFile resolved targetFile do throw ("Could not cache texture: " + resolved)
+   )
+   if cacheEntry == undefined then (
+    cacheEntry = GCMatterportLiveTextureData sourcePath: resolved
+    append sessionData.textureCache cacheEntry
+   )
+   cacheEntry.stamp = cacheEntry.observedStamp
+   cacheEntry.url = "textures/" + fileName
+ )
+ local wrapU = if coords.U_Mirror then 1002 else if coords.U_Tile then 1000 else 1001
+ local wrapV = if coords.V_Mirror then 1002 else if coords.V_Tile then 1000 else 1001
+ return "{\"url\":" + (GCMatterportLiveJSONQuote (if stageTextures then cacheEntry.url else resolved + "|" + cacheEntry.observedStamp)) + ",\"uv\":" + ((coords.mapChannel - 1) as string) + ",\"tiling\":[" + (GCMatterportLiveNumber coords.U_Tiling) + "," + (GCMatterportLiveNumber coords.V_Tiling) + "],\"offset\":[" + (GCMatterportLiveNumber coords.U_Offset) + "," + (GCMatterportLiveNumber coords.V_Offset) + "],\"rotation\":" + (GCMatterportLiveNumber coords.W_Angle) + ",\"wrap\":[" + (wrapU as string) + "," + (wrapV as string) + "]}"
+)
+
+fn GCMatterportLiveCapture sessionData forceCheck: false stageTextures: true = (
+ local sourceNode = sessionData.nodeRef
+ if (not isValidNode sourceNode or sourceNode.layer.name != sessionData.layerName) do throw "The source LOD changed. Reopen Live Preview."
+ local parentMaterial = sourceNode.material
+ if (parentMaterial == undefined or classOf parentMaterial != MultiMaterial or (parentMaterial.materialIDList as string) != sessionData.materialLayout) do throw "The material ID layout changed. Reopen Live Preview."
+ local stateRows = #()
+ for actualID in sessionData.materialIDs do (
+  local slotIndex = findItem parentMaterial.materialIDList actualID
+  local materialRef = parentMaterial.materialList[slotIndex]
+  if (materialRef == undefined or classOf materialRef != glTFMaterial) do throw "Live Preview requires glTF materials."
+  local sourceEntry = GCMatterportMaterialEntry nodeRef: sourceNode materialID: actualID
+  local aoEnabled = GCMatterportSceneProperties.getValue ((GCMatterportAOKey sourceEntry) + "enabled") true
+  local fields = #()
+  for propertyName in #(#baseColor, #emissionColor, #sheenColor, #specularColor, #volumeColor) do append fields #((toLower (propertyName as string)), GCMatterportLiveColor (getProperty materialRef propertyName))
+  for propertyName in #(#metalness, #roughness, #normal, #ambientOcclusion, #alphaMode, #alphaCutoff, #clearcoat, #clearcoatRoughness, #clearcoatNormal, #sheenRoughness, #specular, #transmission, #indexOfRefraction, #volumeThickness, #volumeDistance) do append fields #((toLower (propertyName as string)), GCMatterportLiveNumber (getProperty materialRef propertyName))
+  for propertyName in #(#DoubleSided, #unlit, #enableClearCoat, #enableSheen, #enableSpecular, #enableTransmission, #enableIndexOfRefraction, #enableVolume) do append fields #((toLower (propertyName as string)), ((getProperty materialRef propertyName) as string))
+  append fields #("aoEnabled", aoEnabled as string)
+  for propertyName in #(#baseColorMap, #AlphaMap, #roughnessMap, #metalnessMap, #normalMap, #ambientOcclusionMap, #emissionMap, #clearcoatMap, #clearcoatRoughnessMap, #clearcoatNormalMap, #sheenColorMap, #sheenRoughnessMap, #specularMap, #specularColorMap, #transmissionMap, #volumeThicknessMap) do (
+   local textureMap = getProperty materialRef propertyName
+   local slotName = toLower (propertyName as string)
+   if (matchPattern slotName pattern: "clearcoat*" and not materialRef.enableClearCoat) do textureMap = undefined
+   if (matchPattern slotName pattern: "sheen*" and not materialRef.enableSheen) do textureMap = undefined
+   if (matchPattern slotName pattern: "specular*" and not materialRef.enableSpecular) do textureMap = undefined
+   if (propertyName == #transmissionMap and not materialRef.enableTransmission) do textureMap = undefined
+   if (propertyName == #volumeThicknessMap and not materialRef.enableVolume) do textureMap = undefined
+   if propertyName == #ambientOcclusionMap and not aoEnabled do textureMap = undefined
+   append fields #((toLower (propertyName as string)), GCMatterportLiveTexture sessionData textureMap forceCheck: forceCheck stageTextures: stageTextures)
+  )
+  append stateRows #("GC_Live_ID_" + (actualID as string), fields)
+ )
+ if (forceCheck or timeStamp() - sessionData.lastTextureCheck >= 1000) do sessionData.lastTextureCheck = timeStamp()
+ return stateRows
+)
+
+fn GCMatterportLiveStateJSON stateRows previousRows: #() = (
+ local content = "{"
+ local written = 0
+ for rowIndex in 1 to stateRows.count do (
+  local fields = stateRows[rowIndex][2]
+  local previousFields = if rowIndex <= previousRows.count then previousRows[rowIndex][2] else #()
+  local fieldContent = ""
+  local fieldCount = 0
+  for fieldIndex in 1 to fields.count do (
+   if (fieldIndex > previousFields.count or fields[fieldIndex][2] != previousFields[fieldIndex][2]) do (
+    if fieldCount > 0 do fieldContent += ","
+    fieldContent += (GCMatterportLiveJSONQuote fields[fieldIndex][1]) + ":" + fields[fieldIndex][2]
+    fieldCount += 1
+   )
+  )
+  if fieldCount > 0 do (
+   if written > 0 do content += ","
+   content += (GCMatterportLiveJSONQuote stateRows[rowIndex][1]) + ":{" + fieldContent + "}"
+   written += 1
+  )
+ )
+ return content + "}"
+)
+
+fn GCMatterportLivePublishAtomic targetFile content = (
+ local staged = targetFile + ".next"
+ local backup = targetFile + ".previous"
+ GCMatterportLiveWrite staged content
+ if doesFileExist targetFile then (dotNetClass "System.IO.File").Replace staged targetFile backup else (dotNetClass "System.IO.File").Move staged targetFile
+ if doesFileExist backup do deleteFile backup
+ return true
+)
+
+
+fn GCMatterportLiveOwnedFolder folderPath = (
+ local rootPath = (dotNetClass "System.IO.Path").GetFullPath (GCMatterportRuntimeFolder + "model-viewer\\live\\")
+ local fullPath = (dotNetClass "System.IO.Path").GetFullPath folderPath
+ local directoryInfo = dotNetObject "System.IO.DirectoryInfo" fullPath
+ if not directoryInfo.Exists do return false
+ if (bit.and (directoryInfo.Attributes.value__ as integer) 1024) != 0 do return false
+ local parentPath = directoryInfo.Parent.FullName + "\\"
+ if (toLower parentPath != toLower rootPath) do return false
+ if not (dotNetClass "System.Text.RegularExpressions.Regex").IsMatch directoryInfo.Name "^[a-f0-9]{32}$" do return false
+ local marker = fullPath + "\\.gc-live-owned"
+ if not doesFileExist marker do return false
+ return matchPattern ((dotNetClass "System.IO.File").ReadAllText marker) pattern: "GC-Matterport-Live-v1|*"
+)
+
+fn GCMatterportLiveSweepSessions = (
+ local rootPath = GCMatterportRuntimeFolder + "model-viewer\\live\\"
+ local closedFolders = #()
+ for folderPath in getDirectories (rootPath + "*") where GCMatterportLiveOwnedFolder folderPath do (
+  local marker = (dotNetClass "System.IO.File").ReadAllText (folderPath + ".gc-live-owned")
+  local markerParts = filterString marker "|"
+  local ownerAlive = false
+  if markerParts.count == 2 do try (
+   local ownerProcess = (dotNetClass "System.Diagnostics.Process").GetProcessById (markerParts[2] as integer)
+   ownerAlive = not ownerProcess.HasExited
+   ownerProcess.Dispose()
+  ) catch (ownerAlive = false)
+  if not ownerAlive then (
+   (dotNetClass "System.IO.Directory").Delete folderPath true
+  ) else if (markerParts[2] == (((dotNetClass "System.Diagnostics.Process").GetCurrentProcess()).Id as string) and doesFileExist (folderPath + ".closed")) do append closedFolders folderPath
+ )
+ -- Keep at most the newest two closed sessions for in-flight browser reads.
+ while closedFolders.count > 2 do (
+  local oldestIndex = 1
+  for itemIndex in 2 to closedFolders.count do (
+   local candidate = dotNetObject "System.IO.FileInfo" (closedFolders[itemIndex] + ".closed")
+   local oldest = dotNetObject "System.IO.FileInfo" (closedFolders[oldestIndex] + ".closed")
+   if candidate.LastWriteTimeUtc.Ticks < oldest.LastWriteTimeUtc.Ticks do oldestIndex = itemIndex
+  )
+  if GCMatterportLiveOwnedFolder closedFolders[oldestIndex] do (dotNetClass "System.IO.Directory").Delete closedFolders[oldestIndex] true
+  deleteItem closedFolders oldestIndex
+ )
+ return true
+)
+
+fn GCMatterportLivePrune sessionData stateRows previousRows = (
+ if not GCMatterportLiveOwnedFolder sessionData.folderPath do return false
+ local retained = (GCMatterportLiveStateJSON stateRows) + (GCMatterportLiveStateJSON previousRows)
+ for filePath in getFiles (sessionData.folderPath + "textures\\*") do (
+  local fileName = filenameFromPath filePath
+  if ((dotNetClass "System.Text.RegularExpressions.Regex").IsMatch fileName "^[a-f0-9]{64}[.](png|jpg|jpeg|webp)$" and findString retained ("textures/" + fileName) == undefined) do deleteFile filePath
+ )
+ sessionData.textureCache = for cached in sessionData.textureCache where (cached.url != undefined and doesFileExist (sessionData.folderPath + substituteString cached.url "/" "\\")) collect cached
+ for filePath in getFiles (sessionData.folderPath + "updates\\*.json") do (
+  local oldRevision = try ((getFilenameFile filePath) as integer) catch (sessionData.revision)
+  if oldRevision < sessionData.revision - 7 do deleteFile filePath
+ )
+ return true
+)
+
+
+fn GCMatterportLiveUpdate forceCheck: false = (
+ local sessionData = GCMatterportLiveSession
+ if sessionData == undefined do throw "Open Live Preview first."
+ if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs or GCMatterportLiveBusy) do return sessionData.revision
+ GCMatterportLiveBusy = true
+ local failureReason = undefined
+ try (
+  if GCMatterportLiveGeometryDirty do (
+   if GCMatterportLiveGeometrySignature sessionData.nodeRef != sessionData.geometrySignature do throw "Geometry, UVs or face Material IDs changed. Reopen Live Preview."
+   GCMatterportLiveGeometryDirty = false
+  )
+  local stateRows = GCMatterportLiveCapture sessionData forceCheck: forceCheck
+  local delta = GCMatterportLiveStateJSON stateRows previousRows: sessionData.lastState
+  if delta != "{}" do (
+   local revision = sessionData.revision + 1
+   local tickText = trimRight (((dotNetClass "System.DateTime").UtcNow.Ticks) as string) "L"
+   local header = "{\"session\":" + (GCMatterportLiveJSONQuote sessionData.token) + ",\"timestamp\":" + (GCMatterportLiveJSONQuote (tickText + "-" + (revision as string))) + ",\"revision\":" + (revision as string)
+   GCMatterportLiveWrite (sessionData.folderPath + "updates\\" + (revision as string) + ".json") (header + ",\"changes\":" + delta + "}")
+   GCMatterportLivePublishAtomic (sessionData.folderPath + "state.json") (header + ",\"materials\":" + (GCMatterportLiveStateJSON stateRows) + "}")
+   GCMatterportLivePublishAtomic (sessionData.folderPath + "manifest.json") (header + "}")
+   local previousRows = sessionData.lastState
+   sessionData.lastState = stateRows
+   sessionData.revision = revision
+   GCMatterportLivePrune sessionData stateRows previousRows
+  )
+ ) catch (failureReason = getCurrentException() as string)
+ GCMatterportLiveBusy = false
+ if failureReason != undefined do throw failureReason
+ return sessionData.revision
+)
+
+fn GCMatterportLiveObserve = (
+ if GCMatterportLiveSession == undefined or GCMatterportLiveBusy or _rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs do return undefined
+ if GCMatterportLiveGeometryDirty do (
+  if GCMatterportLiveGeometrySignature GCMatterportLiveSession.nodeRef != GCMatterportLiveSession.geometrySignature do throw "Geometry or UVs changed. Reopen Live Preview."
+  GCMatterportLiveGeometryDirty = false
+ )
+ local observed = GCMatterportLiveStateJSON (GCMatterportLiveCapture GCMatterportLiveSession stageTextures: false)
+ if observed != GCMatterportLiveObserved then (
+  GCMatterportLiveObserved = observed
+  GCMatterportLivePendingAt = timeStamp()
+ ) else if (GCMatterportLivePendingAt != undefined and timeStamp() - GCMatterportLivePendingAt >= 200) do (
+  GCMatterportLiveUpdate()
+  GCMatterportLivePendingAt = undefined
+ )
+ return GCMatterportLiveSession.revision
+)
+
+fn GCMatterportLiveStop = (
+ try (GCMatterportLiveRollout.tmrLive.active = false) catch()
+ deleteAllChangeHandlers id: #GCMatterportLiveGeometry
+ if (GCMatterportLiveSession != undefined and GCMatterportLiveOwnedFolder GCMatterportLiveSession.folderPath) do (
+  GCMatterportLiveWrite (GCMatterportLiveSession.folderPath + ".closed") "closed"
+  GCMatterportLivePublishAtomic (GCMatterportLiveSession.folderPath + "manifest.json") ("{\"session\":" + (GCMatterportLiveJSONQuote GCMatterportLiveSession.token) + ",\"closed\":true}")
+ )
+ GCMatterportLiveSession = undefined
+ GCMatterportLiveObserved = undefined
+ GCMatterportLivePendingAt = undefined
+ GCMatterportLiveBusy = false
+ GCMatterportLiveSweepSessions()
+ return true
+)
+
+fn GCMatterportLiveOpen layerName openBrowser: true = (
+ if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs or GCMatterportLiveBusy) do throw "Another render/export/preview operation is active."
+ GCMatterportLiveStop()
+ GCMatterportEnsureViewerInstalled()
+ GCMatterportLiveSweepSessions()
+ local entries = GCMatterportLiveEntries layerName
+ local sourceNode = entries[1].nodeRef
+ local token = ((dotNetClass "System.Guid").NewGuid()).ToString("N")
+ local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
+ local folderPath = viewerFolder + "live\\" + token + "\\"
+ for relative in #("geometry\\", "textures\\", "updates\\") do makeDir (folderPath + relative) all: true
+ GCMatterportLiveWrite (folderPath + ".gc-live-owned") ("GC-Matterport-Live-v1|" + (((dotNetClass "System.Diagnostics.Process").GetCurrentProcess()).Id as string))
+ GCMatterportLiveWrite (folderPath + ".closed") "pending"
+ local whiteImage = dotNetObject "System.Drawing.Bitmap" 1 1
+ whiteImage.SetPixel 0 0 ((dotNetClass "System.Drawing.Color").FromArgb 255 255 255 255)
+ whiteImage.Save (folderPath + "white.png") (dotNetClass "System.Drawing.Imaging.ImageFormat").Png
+ whiteImage.Dispose()
+ local sessionData = GCMatterportLiveSessionData token: token layerName: layerName nodeRef: sourceNode geometrySignature: (GCMatterportLiveGeometrySignature sourceNode) materialIDs: (for entry in entries collect entry.materialID) folderPath: folderPath materialLayout: (sourceNode.material.materialIDList as string) textureCache: #() lastState: #()
+ -- Validate and stage materials before the one-time geometry export.
+ GCMatterportLiveCapture sessionData forceCheck: true
+ local timerActive = _rExportGCMatterportGLBConverter.tmrLODRefresh.active
+ local originalLODs = _rExportGCMatterportGLBConverter.lbxLODs.selection
+ local failureReason = undefined
+ _rExportGCMatterportGLBConverter.tmrLODRefresh.active = false
+ _rExportGCMatterportGLBConverter.isExportingLODs = true
+ try (
+  local geometryGLTF = GCMatterportLiveExportGeometry sessionData entries (folderPath + "geometry\\")
+  GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "gltfpack.exe") ("-noq -km -kn -i \"" + geometryGLTF + "\" -o \"" + folderPath + "geometry/scene.glb\"") GCMatterportRuntimeFolder operationLabel: "Live Preview initial geometry"
+ ) catch (failureReason = getCurrentException() as string)
+ _rExportGCMatterportGLBConverter.isExportingLODs = false
+ _rExportGCMatterportGLBConverter.lbxLODs.selection = originalLODs
+ _rExportGCMatterportGLBConverter.tmrLODRefresh.active = timerActive
+ if failureReason != undefined do throw failureReason
+ if GCMatterportLiveOwnedFolder folderPath do (
+  for filePath in getFiles (folderPath + "geometry\\*") where (filenameFromPath filePath != "scene.glb") do deleteFile filePath
+  for directoryPath in getDirectories (folderPath + "geometry\\*") do (dotNetClass "System.IO.Directory").Delete directoryPath true
+  deleteFile (folderPath + "white.png")
+ )
+ deleteFile (folderPath + ".closed")
+ GCMatterportLiveSession = sessionData
+ GCMatterportLiveGeometryDirty = false
+ GCMatterportLiveUpdate forceCheck: true
+ GCMatterportLiveObserved = GCMatterportLiveStateJSON (GCMatterportLiveCapture sessionData stageTextures: false)
+ GCMatterportLivePendingAt = undefined
+ when geometry sourceNode changes id: #GCMatterportLiveGeometry do (GCMatterportLiveGeometryDirty = true)
+ when topology sourceNode changes id: #GCMatterportLiveGeometry do (GCMatterportLiveGeometryDirty = true)
+ when transform sourceNode changes id: #GCMatterportLiveGeometry do (GCMatterportLiveGeometryDirty = true)
+ try (GCMatterportLiveRollout.tmrLive.active = true) catch()
+ local portNumber = GCMatterportEnsurePreviewServer viewerFolder
+ local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?live=" + token + "&title=" + ((dotNetClass "System.Uri").EscapeDataString layerName)
+ if openBrowser do ShellLaunch previewURL ""
+ return previewURL
+)
+
+rollout GCMatterportLiveRollout "Google Live Preview Materials" (
+ label lblLiveInfo "Select one LOD and open it. Material edits then sync automatically." width: 330 height: 32
+ button btnOpenLive "Open Live Preview" width: 156 across: 2
+ button btnUpdateLive "Refresh Textures" width: 156
+ label lblLiveStatus "Initial geometry loads once. Keep this window open to sync." width: 330 height: 44
+ timer tmrLive interval: 50 active: false
+ on btnOpenLive pressed do (
+  try (
+   local rows = _rExportGCMatterportGLBConverter.lbxLODs.selection as array
+   local allLODs = GCMatterportGetData()
+   if rows.count != 1 do throw "Select exactly one LOD."
+   GCMatterportLiveOpen allLODs[rows[1]].layerName
+   lblLiveStatus.text = "Auto sync active. Edit glTF materials in the Material Editor."
+  ) catch (messageBox (getCurrentException() as string) title: "Google Live Preview")
+ )
+ on tmrLive tick do (
+  if GCMatterportLiveSession != undefined do (
+   try (
+    local revision = GCMatterportLiveObserve()
+    lblLiveStatus.text = "Auto sync active - revision " + revision as string
+   ) catch (lblLiveStatus.text = getCurrentException() as string)
+  )
+ )
+ on btnUpdateLive pressed do (
+  try (GCMatterportLiveUpdate forceCheck: true) catch (messageBox (getCurrentException() as string) title: "Refresh Textures")
+ )
+ on GCMatterportLiveRollout close do GCMatterportLiveStop()
+)
+
+
 struct GCMatterportAOClipboardEntry (
 	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution
 )
@@ -1479,6 +1988,7 @@ global GCMatterportAOClipboard
 rcmenu GCMatterportLODContextMenu (
 	menuItem previewLODItem "Preview in Google Model Viewer"
 	menuItem previewPCLODItem "Preview in PlayCanvas Viewer"
+	menuItem liveMaterialsItem "Live Preview Materials..."
 	separator previewSeparator
 	menuItem copyPropertiesItem "Copy Material Properties"
 	menuItem pastePropertiesItem "Paste Material Properties"
@@ -1492,6 +2002,7 @@ rcmenu GCMatterportLODContextMenu (
 	)
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
 	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
+	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 354 142)
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
 	on pastePropertiesItem picked do _rExportGCMatterportGLBConverter.pasteLODProperties()
 	on deleteLODsItem picked do _rExportGCMatterportGLBConverter.deleteSelectedLODs()
