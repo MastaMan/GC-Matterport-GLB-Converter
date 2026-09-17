@@ -19,7 +19,7 @@ Script for proper conversion model to GLB=
 
 
 try(closeRolloutFloater floaterGCMatterportGLBConverter) catch()
-global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 560
+global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 580
 
 struct '@' (
 	currScript = getThisScriptFileName(),
@@ -339,6 +339,27 @@ fn GCMatterportPublishAO completedFilePath outputFolder materialEntry = (
 
 struct GCMatterportAOBakeResult (filePath, errorMessage, cancelled = false)
 
+
+struct GCMatterportAOOutputState (conversion, colorSpace, display, viewTransform)
+
+fn GCMatterportCaptureAOOutput = (
+	local outputSpace = ""
+	local outputDisplay = ""
+	local outputView = ""
+	local conversionType = ColorPipelineMgr.GetDefaultOutputConversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView fileType: #GammaEncoded
+	return GCMatterportAOOutputState conversion: conversionType colorSpace: outputSpace display: outputDisplay viewTransform: outputView
+)
+
+fn GCMatterportRestoreAOOutput outputState = (
+	local outputSpace = outputState.colorSpace
+	local outputDisplay = outputState.display
+	local outputView = outputState.viewTransform
+	if (not ColorPipelineMgr.SetDefaultOutputConversion outputState.conversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView fileType: #GammaEncoded) do throw "Could not restore the original JPEG output color conversion."
+	local restoredState = GCMatterportCaptureAOOutput()
+	if (restoredState.conversion != outputState.conversion or restoredState.colorSpace != outputState.colorSpace or restoredState.display != outputState.display or restoredState.viewTransform != outputState.viewTransform) do throw "JPEG output color conversion did not restore to its original settings."
+	return true
+)
+
 fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 	local bakeResult = GCMatterportAOBakeResult()
 	bakeResult.errorMessage = GCMatterportAOPreflight materialEntry
@@ -356,6 +377,8 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 	local rawFilePath = ""
 	local runFolder = undefined
 	local runToken = undefined
+	local originalAOOutput = undefined
+	local restoreAOOutput = false
 	try (
 		if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The material assignment changed. Refresh the list."
 		if (Corona == undefined or CoronaAO == undefined or CoronaPhysicalMtl == undefined or Corona_DiffuseColor == undefined) do throw "Corona renderer, AO map, physical material and DiffuseColor bake element are required."
@@ -369,6 +392,11 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 		runFolder = outputFolder + "._ao_" + runToken + "\\"
 		if (not makeDir runFolder all: true) do throw "Could not create AO output folder."
 		rawFilePath = runFolder + fileStem + ".jpg"
+		-- Native Corona RTT uses the default JPEG output transform, as in GC Configurator.
+		originalAOOutput = GCMatterportCaptureAOOutput()
+		restoreAOOutput = true
+		if (not ColorPipelineMgr.SetDefaultOutputConversion #NoConversion fileType: #GammaEncoded) do throw "Could not disable the JPEG output display transform for AO."
+		if ((GCMatterportCaptureAOOutput()).conversion != #NoConversion) do throw "AO requires JPEG output without a display transform."
 		-- Work on an evaluated copy. The original stack, UVs and bake properties stay intact.
 		subObjectLevel = 0
 		setCommandPanelTaskMode mode: #create
@@ -421,6 +449,12 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 			bakeElement.filter = true
 			temporaryNode.INodeBakeProperties.removeAllBakeElements()
 			if (not temporaryNode.INodeBakeProperties.addBakeElement bakeElement) do throw "Could not add the Corona bake element."
+			-- Set after attachment: adding an element can reset its output bitmap settings.
+			ElementSetCustomGamma bakeElement 1.0
+			if (ElementSetOutputColorConversion != undefined) do (
+				ElementSetOutputColorConversion bakeElement #noConversion
+				if (ElementGetOutputColorConversion bakeElement != #noConversion) do throw "Could not disable the display transform for AO output."
+			)
 			temporaryNode.INodeBakeProperties.bakeEnabled = true
 			temporaryNode.INodeBakeProperties.bakeChannel = 2
 			temporaryNode.INodeBakeProperties.nDilations = 4
@@ -435,6 +469,8 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 			select temporaryNode
 			renderBitmap = render rendertype: #bakeSelected frame: currentTime outputSize: [aoOptions.resolution, aoOptions.resolution] vfb: false progressBar: true renderhiddenobjects: true cancelled: &wasCancelled
 		)
+		GCMatterportRestoreAOOutput originalAOOutput
+		restoreAOOutput = false
 		if (wasCancelled or renderBitmap == undefined) do (
 			bakeResult.cancelled = true
 			throw "AO rendering cancelled or returned no image."
@@ -449,6 +485,13 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 	) catch (
 		bakeResult.errorMessage = getCurrentException() as string
 		if (wasCancelled or keyboard.escPressed or findString bakeResult.errorMessage "cancelled" != undefined) do bakeResult.cancelled = true
+	)
+	-- Also restore after setup failure, render exception or cancellation.
+	if (restoreAOOutput and originalAOOutput != undefined) do (
+		try (GCMatterportRestoreAOOutput originalAOOutput) catch (
+			local restoreError = getCurrentException() as string
+			bakeResult.errorMessage = (if bakeResult.errorMessage == undefined then "" else bakeResult.errorMessage + "\n") + restoreError
+		)
 	)
 	-- Cleanup runs after success, render cancellation, denoiser failure and setup errors.
 	if (renderBitmap != undefined) do try (close renderBitmap) catch (format "AO bitmap cleanup: %\n" (getCurrentException()))
@@ -489,8 +532,12 @@ fn GCMatterportAssignAO materialEntry filePath = (
 	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The target material changed during rendering. The AO image was kept without assigning it."
 	local parentMaterial = materialEntry.nodeRef.material
 	local replacementMaterial = copy materialEntry.materialRef
-	local aoMap = Bitmaptexture filename: filePath name: "AO"
-	reload aoMap.bitmap
+	local aoMap = Bitmaptexture name: "AO"
+	-- AO stores scalar data: bypass image input rules and refresh an overwritten file.
+	local aoBitmap = if (ColorPipelineMgr != undefined and ColorPipelineMgr.DataColorSpace != "") then (openBitmap filePath colorSpace: ColorPipelineMgr.DataColorSpace) else (openBitmap filePath gamma: 1.0)
+	if (aoBitmap == undefined) do throw "Could not open the completed AO bitmap."
+	forceReloadBitmapFile aoBitmap
+	aoMap.bitmap = aoBitmap
 	aoMap.coords.mapChannel = 2
 	replacementMaterial.ambientOcclusionMap = aoMap
 	replacementMaterial.ambientOcclusion = 1.0
@@ -803,6 +850,12 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem denoiserEnable "Enable"
 		menuItem denoiserDisable "Disable"
 	)
+	separator renderAOSeparator
+	menuItem renderSelectedAOItem "Render AO for Selected IDs"
+	on GCMatterportMaterialContextMenu open do (
+		renderSelectedAOItem.enabled = _rExportGCMatterportGLBConverter.btnRenderAO.enabled
+	)
+	on renderSelectedAOItem picked do _rExportGCMatterportGLBConverter.renderSelectedAO()
 	on aoEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled true
 	on aoDisable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled false
 	on passes1 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 1
@@ -1256,13 +1309,176 @@ fn GCMatterportPreviewLOD layerName = (
 	return true
 )
 
+global GCMatterportPCPreviewProcess
+global GCMatterportPCPreviewPort
+global GCMatterportPCPreviewRoot
+global GCMatterportPCPreviewToken
+
+fn GCMatterportStopPCPreviewServer = (
+	if (GCMatterportPCPreviewProcess != undefined) do (
+		try (
+			if (not GCMatterportPCPreviewProcess.HasExited) do GCMatterportPCPreviewProcess.Kill()
+			GCMatterportPCPreviewProcess.Dispose()
+		) catch (format "Preview server cleanup: %\n" (getCurrentException()))
+	)
+	GCMatterportPCPreviewProcess = undefined
+	GCMatterportPCPreviewPort = undefined
+	return true
+)
+
+fn GCMatterportPCPreviewServerReady portNumber expectedToken = (
+	local response = undefined
+	local reader = undefined
+	local isReady = false
+	try (
+		local request = (dotNetClass "System.Net.WebRequest").Create ("http://127.0.0.1:" + (portNumber as string) + "/viewer-ready.txt")
+		request.Timeout = 300
+		request.ReadWriteTimeout = 300
+		request.Proxy = undefined
+		response = request.GetResponse()
+		reader = dotNetObject "System.IO.StreamReader" (response.GetResponseStream())
+		isReady = ((reader.ReadToEnd()) == expectedToken)
+	) catch (isReady = false)
+	if (reader != undefined) do reader.Dispose()
+	if (response != undefined) do response.Dispose()
+	return isReady
+)
+
+fn GCMatterportEnsurePCPreviewServer viewerFolder = (
+	if (GCMatterportPCPreviewProcess != undefined) do (
+		if (not GCMatterportPCPreviewProcess.HasExited and GCMatterportPCPreviewRoot == viewerFolder) do (
+			if (GCMatterportPCPreviewServerReady GCMatterportPCPreviewPort GCMatterportPCPreviewToken) do return GCMatterportPCPreviewPort
+		)
+		GCMatterportStopPCPreviewServer()
+	)
+	local serverExecutable = viewerFolder + "localhost.exe"
+	GCMatterportPCPreviewRoot = viewerFolder
+	GCMatterportPCPreviewToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
+	(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") GCMatterportPCPreviewToken
+	-- Choose a free port; retry if another process takes it between reservation and launch.
+	for attemptIndex in 1 to 3 do (
+		local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
+		listener.Start()
+		local localEndpoint = listener.LocalEndpoint
+		local portNumber = localEndpoint.Port
+		listener.Stop()
+		local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+		startInfo.FileName = serverExecutable
+		startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
+		startInfo.WorkingDirectory = viewerFolder
+		startInfo.UseShellExecute = false
+		startInfo.CreateNoWindow = true
+		startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
+		GCMatterportPCPreviewProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
+		for waitIndex in 1 to 15 while (not GCMatterportPCPreviewProcess.HasExited) do (
+			if (GCMatterportPCPreviewServerReady portNumber GCMatterportPCPreviewToken) do (
+				GCMatterportPCPreviewPort = portNumber
+				callbacks.removeScripts id: #GCMatterportPCPreviewShutdown
+				callbacks.addScript #preSystemShutdown "GCMatterportStopPCPreviewServer()" id: #GCMatterportPCPreviewShutdown
+				return portNumber
+			)
+			sleep 0.1
+		)
+		GCMatterportStopPCPreviewServer()
+	)
+	throw "The local Model Viewer server could not start. Check that localhost.exe is allowed to listen on the loopback interface."
+)
+
+
+
+fn GCMatterportPCViewerFiles = (
+	return #("LICENSE-engine.txt", "LICENSE-pcui.txt", "LICENSE-observer.txt", "LICENSE-react.txt", "LICENSE-meshoptimizer.txt", "LICENSE-basis.txt", "LICENSE-draco.txt", "index.html", "index.js", "style.css", "localhost.exe", "mime.types", "LICENSE.txt", "LOCAL-CHANGES.txt", "static\\playcanvas-logo.png", "static\\icons\\fly-mode.svg", "static\\icons\\orbit-mode.svg", "static\\lib\\basis\\basis.js", "static\\lib\\basis\\basis.wasm.js", "static\\lib\\basis\\basis.wasm.wasm", "static\\lib\\draco\\draco.js", "static\\lib\\draco\\draco.wasm.js", "static\\lib\\draco\\draco.wasm.wasm", "static\\lib\\lodepng\\lodepng.js", "static\\lib\\lodepng\\lodepng.wasm", "static\\skybox\\artist_workshop_2k.hdr")
+)
+
+fn GCMatterportEnsurePCViewerInstalled = (
+	local viewerFolder = GCMatterportRuntimeFolder + "playcanvas-viewer\\"
+	local isInstalled = true
+	for relativeFile in GCMatterportPCViewerFiles() do (
+		if (not doesFileExist (viewerFolder + relativeFile)) do isInstalled = false
+	)
+	if (isInstalled) do return true
+	local archivePath = GCMatterportRuntimeFolder + "playcanvas-viewer.zip"
+	if (not doesFileExist archivePath) do throw "playcanvas-viewer.zip is missing beside the converter script."
+	local stageRoot = GCMatterportRuntimeFolder + "._pcviewer_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N")
+	local backupRoot = stageRoot + "_previous"
+	local installRoot = trimRight viewerFolder "\\"
+	local archive = undefined
+	local installFailure = undefined
+	local replacedOld = false
+	try (
+		dotNet.loadAssembly "System.IO.Compression.FileSystem"
+		makeDir stageRoot all: true
+		archive = (dotNetClass "System.IO.Compression.ZipFile").OpenRead archivePath
+		for relativeFile in GCMatterportPCViewerFiles() do (
+			local entry = archive.GetEntry (substituteString relativeFile "\\" "/")
+			if (entry == undefined or entry.Length == 0) do throw ("PlayCanvas archive is missing: " + relativeFile)
+			local destination = stageRoot + "\\" + relativeFile
+			makeDir (getFilenamePath destination) all: true
+			(dotNetClass "System.IO.Compression.ZipFileExtensions").ExtractToFile entry destination false
+		)
+		archive.Dispose()
+		archive = undefined
+		GCMatterportStopPCPreviewServer()
+		if (doesDirectoryExist installRoot) do (
+			(dotNetClass "System.IO.Directory").Move installRoot backupRoot
+			replacedOld = true
+		)
+		(dotNetClass "System.IO.Directory").Move stageRoot installRoot
+	) catch (installFailure = getCurrentException() as string)
+	if (archive != undefined) do archive.Dispose()
+	if (installFailure != undefined and replacedOld and not doesDirectoryExist installRoot) do (
+		(dotNetClass "System.IO.Directory").Move backupRoot installRoot
+		replacedOld = false
+	)
+	if (doesDirectoryExist stageRoot) do try ((dotNetClass "System.IO.Directory").Delete stageRoot true) catch (format "PlayCanvas staging cleanup: %\n" (getCurrentException()))
+	if (installFailure == undefined and replacedOld) do try ((dotNetClass "System.IO.Directory").Delete backupRoot true) catch (format "Previous PlayCanvas cleanup: %\n" (getCurrentException()))
+	if (installFailure != undefined) do throw installFailure
+	return true
+)
+fn GCMatterportPreviewPCLOD layerName openBrowser: true = (
+	if (not GCMatterportLODHasGLB layerName) do throw "Export this LOD to GLB before opening its preview."
+	GCMatterportEnsurePCViewerInstalled()
+	local viewerFolder = GCMatterportRuntimeFolder + "playcanvas-viewer\\"
+	local sourceFile = maxFilePath + "export\\" + (GCMatterportExportFileName layerName)
+	local modelsFolder = viewerFolder + "models\\"
+	makeDir modelsFolder all: true
+	-- ASCII filenames avoid old TinyWeb filename encoding limits; the title remains Unicode.
+	local modelKey = GCMatterportFileKey ((dotNetClass "System.IO.Path").GetFullPath sourceFile)
+	local destinationFile = modelsFolder + modelKey + ".glb"
+	local stagedFile = modelsFolder + modelKey + ".tmp"
+	local backupFile = modelsFolder + modelKey + ".previous"
+	local previewFailure = undefined
+	local previewURL = undefined
+	try (
+		(dotNetClass "System.IO.File").Copy sourceFile stagedFile true
+		if (doesFileExist destinationFile) then (
+			(dotNetClass "System.IO.File").Replace stagedFile destinationFile backupFile
+			if (doesFileExist backupFile) do deleteFile backupFile
+		) else (
+			(dotNetClass "System.IO.File").Move stagedFile destinationFile
+		)
+		local portNumber = GCMatterportEnsurePCPreviewServer viewerFolder
+		local titleValue = (dotNetClass "System.Uri").EscapeDataString layerName
+		local cacheVersion = ((dotNetClass "System.DateTime").UtcNow.Ticks as string)
+		previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?default&load=" + ((dotNetClass "System.Uri").EscapeDataString ("models/" + modelKey + ".glb?v=" + cacheVersion)) + "&title=" + titleValue
+		if (openBrowser) do ShellLaunch previewURL ""
+	) catch (
+		previewFailure = getCurrentException() as string
+		if (doesFileExist stagedFile) do deleteFile stagedFile
+	)
+	if (previewFailure != undefined) do throw previewFailure
+	return previewURL
+)
+
+
 struct GCMatterportAOClipboardEntry (
 	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution
 )
 global GCMatterportAOClipboard
 
 rcmenu GCMatterportLODContextMenu (
-	menuItem previewLODItem "Preview in Model Viewer"
+	menuItem previewLODItem "Preview in Google Model Viewer"
+	menuItem previewPCLODItem "Preview in PlayCanvas Viewer"
 	separator previewSeparator
 	menuItem copyPropertiesItem "Copy Material Properties"
 	menuItem pastePropertiesItem "Paste Material Properties"
@@ -1270,10 +1486,12 @@ rcmenu GCMatterportLODContextMenu (
 	menuItem deleteLODsItem "Delete LODs"
 	on GCMatterportLODContextMenu open do (
 		previewLODItem.enabled = _rExportGCMatterportGLBConverter.canPreviewLOD()
+		previewPCLODItem.enabled = previewLODItem.enabled
 		copyPropertiesItem.enabled = _rExportGCMatterportGLBConverter.canCopyLODProperties()
 		pastePropertiesItem.enabled = _rExportGCMatterportGLBConverter.canPasteLODProperties()
 	)
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
+	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
 	on pastePropertiesItem picked do _rExportGCMatterportGLBConverter.pasteLODProperties()
 	on deleteLODsItem picked do _rExportGCMatterportGLBConverter.deleteSelectedLODs()
@@ -1414,6 +1632,7 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 )
 
 rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (	
+	label lblCompleteStatus "Complete status: [GLB] [AO]" align: #left width: 326 toolTip: "GLB: exported file exists. AO: all enabled material IDs have AO maps. Check: one object with valid glTF materials."
 	group "LODs" (
 		multiListbox lbxLODs "" items: #() height: 4 offset: [-2, 0] width: 326
 		
@@ -1898,11 +2117,11 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		return ((getLODPropertyEntries layerName) != undefined and (GCMatterportLODHasGLB layerName))
 	)
 
-	fn previewSelectedLOD = (
+	fn previewSelectedLOD usePlayCanvas: false = (
 		if (not canPreviewLOD()) do return false
 		local rowIndex = (lbxLODs.selection as array)[1]
 		try (
-			GCMatterportPreviewLOD lodEntries[rowIndex].layerName
+			if (usePlayCanvas) then GCMatterportPreviewPCLOD lodEntries[rowIndex].layerName else GCMatterportPreviewLOD lodEntries[rowIndex].layerName
 		) catch (
 			messageBox ("Cannot open Model Viewer.\n" + (getCurrentException() as string)) title: "Preview in Model Viewer" beep: false
 			return false
@@ -2391,6 +2610,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	on _rExportGCMatterportGLBConverter open do (
+		lblCompleteStatus.text = "Complete status: [GLB] [AO] [" + (dotNetClass "System.Char").ConvertFromUtf32 10003 + "]"
 		-- Spinner.pos is its arrow position, not the start of its caption.
 		local passesPosition = spnAOPasses.pos
 		spnAOSize.pos = passesPosition + [113, 0]
@@ -2507,7 +2727,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
 			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
 			if (hasNewVersion) do (
-				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "GC-Matterport-GLB-Converter.ms")
+				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Matterport-GLB-Converter.ms")
 				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
 				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
 				for fileName in updateFiles do (
