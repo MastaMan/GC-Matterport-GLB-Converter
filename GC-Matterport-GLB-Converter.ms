@@ -76,6 +76,7 @@ struct GCMatterportMaterialEntry (
 	slotIndex,
 	materialID,
 	materialName,
+	validationError,
 	displayText
 )
 
@@ -106,6 +107,7 @@ struct GCMatterportAOOptions (
 )
 
 global GCMatterportRuntimeFolder = getFilenamePath (getThisScriptFileName())
+fileIn (GCMatterportRuntimeFolder + "GC-Height-to-Normal.ms")
 
 global GCMatterportSceneProperties = GCMatterportScenePropertyStore()
 
@@ -137,6 +139,7 @@ fn GCMatterportAutomaticAOResolution layerName = (
 
 -- One getter for UI and future AO baking. Size is stored in cm, converted at use time.
 fn GCMatterportGetEffectiveAOOptions materialEntry = (
+	if (materialEntry != undefined and (materialEntry.materialRef == undefined or classOf materialEntry.materialRef != glTFMaterial or materialEntry.validationError != undefined)) do return undefined
 	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do return undefined
 	local propertyKey = GCMatterportAOKey materialEntry
 	local aoOptions = GCMatterportAOOptions()
@@ -258,7 +261,7 @@ fn GCMatterportOptimizeAO filePath = (
 fn GCMatterportValidateAOBakeMesh sourceMesh materialID = (
 	local selectedFaces = for faceIndex in 1 to sourceMesh.numfaces where (getFaceMatID sourceMesh faceIndex == materialID) collect faceIndex
 	if (selectedFaces.count == 0) do return ("No faces are assigned to Material ID " + (materialID as string) + ". Select a material ID used by this object, or assign this ID to the intended faces.")
-	local uvInstruction = "Cannot bake AO for this ID: UV channel 2 is missing or unusable on its faces. Select this ID and run Transfer UV Channel from 1 -> 2."
+	local uvInstruction = "Cannot bake AO for this ID: UV channel 2 is missing or unusable on its faces. Select this ID and run Transfer All IDs: Channel 1 -> 2."
 	if (not meshop.getMapSupport sourceMesh 2) do return uvInstruction
 	local mapVertexCount = meshop.getNumMapVerts sourceMesh 2
 	if (mapVertexCount < 3) do return uvInstruction
@@ -271,13 +274,13 @@ fn GCMatterportValidateAOBakeMesh sourceMesh materialID = (
 				if (mapIndex < 1 or mapIndex > mapVertexCount) do return uvInstruction
 				local uvPoint = meshop.getMapVert sourceMesh 2 mapIndex
 				-- Positive bounds tests also reject non-finite UV values.
-				if (not (uvPoint.x >= -0.0001 and uvPoint.y >= -0.0001 and uvPoint.x <= 1.0001 and uvPoint.y <= 1.0001)) do return ("Cannot bake AO for this ID: its UV channel 2 coordinates are outside 0..1 or invalid. Run Transfer UV Channel from 1 -> 2 for this ID.")
+				if (not (uvPoint.x >= -0.0001 and uvPoint.y >= -0.0001 and uvPoint.x <= 1.0001 and uvPoint.y <= 1.0001)) do return ("Cannot bake AO for this ID: its UV channel 2 coordinates are outside 0..1 or invalid. Run Transfer All IDs: Channel 1 -> 2 for this ID.")
 				append uvCorners uvPoint
 			)
 			local edgeA = uvCorners[2] - uvCorners[1]
 			local edgeB = uvCorners[3] - uvCorners[1]
 			local uvAreaTwice = abs (edgeA.x * edgeB.y - edgeA.y * edgeB.x)
-			if (uvAreaTwice <= 1e-12) do return ("Cannot bake AO for this ID: UV channel 2 contains collapsed faces with no usable UV area. Run Transfer UV Channel from 1 -> 2 for this ID.")
+			if (uvAreaTwice <= 1e-12) do return ("Cannot bake AO for this ID: UV channel 2 contains collapsed faces with no usable UV area. Run Transfer All IDs: Channel 1 -> 2 for this ID.")
 		)
 	) catch (
 		return uvInstruction
@@ -510,8 +513,12 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 			select (for sceneNode in originalSelection where (isValidNode sceneNode) collect sceneNode)
 			setCommandPanelTaskMode mode: originalPanelMode
 			if (originalPanelMode == #modify and originalStackObject != undefined) do modPanel.setCurrentObject originalStackObject
-			subObjectLevel = originalSubObjectLevel
-		) catch (bakeResult.errorMessage = "Could not restore the original selection/panel: " + (getCurrentException() as string))
+			if (originalPanelMode == #modify) do (
+				-- No sub-object level exists outside a compatible Modify context.
+				if (originalSubObjectLevel != undefined) then subObjectLevel = originalSubObjectLevel
+				else if (subObjectLevel != undefined) do subObjectLevel = 0
+			)
+		) catch (bakeResult.errorMessage = (if bakeResult.errorMessage == undefined then "" else bakeResult.errorMessage + "\n") + "Could not restore the original selection/panel: " + (getCurrentException() as string))
 	)
 	if (runFolder != undefined and doesDirectoryExist runFolder) do (
 		try (
@@ -558,6 +565,7 @@ fn GCMatterportAssignAO materialEntry filePath = (
 )
 
 fn GCMatterportFormatMaterialRow materialEntry = (
+	if materialEntry.validationError != undefined do return ((materialEntry.materialID as string) + ": Error: " + materialEntry.validationError)
 	local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 	local propertyKey = GCMatterportAOKey materialEntry
 	local isEnabled = GCMatterportSceneProperties.getValue (propertyKey + "enabled") true
@@ -643,33 +651,112 @@ fn GCMatterportSaveAOOptions materialEntry aoOptions = (
 	return true
 )
 
+-- Shared map validation: no render/bake during UI refresh.
+fn GCMatterportMapIssue textureMap slotPath allowHeightNormal: false visited: #() = (
+	if textureMap == undefined do return undefined
+	if (findItem visited textureMap) != 0 do return (slotPath + ": cyclic texture graph")
+	append visited textureMap
+	if (classOf textureMap == GCMatterportHeightNormal and allowHeightNormal) then (
+		local inputIssue = GCMatterportHeightBitmapIssue textureMap.HeightBitmap
+		if inputIssue != undefined do return (slotPath + ": " + inputIssue)
+		return undefined
+	)
+	if (classOf textureMap != Bitmaptexture) do return ((classOf textureMap as string) + " in " + slotPath + "; use Bitmap")
+	for mapIndex in 1 to getNumSubTexmaps textureMap do (
+		local mapIssue = GCMatterportMapIssue (getSubTexmap textureMap mapIndex) (slotPath + "/" + getSubTexmapSlotName textureMap mapIndex) visited: visited
+		if mapIssue != undefined do return mapIssue
+	)
+	return undefined
+)
+
+fn GCMatterportMaterialIssue materialRef allowHeightNormal: true = (
+	if (materialRef == undefined) do return "missing glTF material"
+	if (classOf materialRef != glTFMaterial) do return ("material is " + (classOf materialRef as string) + ", not glTF")
+	for mapIndex in 1 to getNumSubTexmaps materialRef do (
+		local textureMap = getSubTexmap materialRef mapIndex
+		local isNormalSlot = false
+		-- Compare slot indices as well as map references: a shared map in Base Color is still invalid.
+		local slotCaption = getSubTexmapSlotName materialRef mapIndex
+		local slotToken = toLower (substituteString (substituteString slotCaption " " "") "_" "")
+		isNormalSlot = (matchPattern slotToken pattern: "*normal*" and not matchPattern slotToken pattern: "*bump*")
+		local mapIssue = GCMatterportMapIssue textureMap slotCaption allowHeightNormal: (allowHeightNormal and isNormalSlot)
+		if mapIssue != undefined do return mapIssue
+	)
+	return undefined
+)
+
+fn GCMatterportAssertExportMaps exportMaterial objectCaption allowHeightNormal: false = (
+	if (classOf exportMaterial != MultiMaterial) do throw (objectCaption + ": Multi/Sub-Object required.")
+	for slotIndex in 1 to exportMaterial.materialList.count do (
+		local materialIssue = GCMatterportMaterialIssue exportMaterial.materialList[slotIndex] allowHeightNormal: allowHeightNormal
+		if materialIssue != undefined do throw (objectCaption + " / ID " + (exportMaterial.materialIDList[slotIndex] as string) + ": " + materialIssue)
+	)
+	return true
+)
+
+global GCMatterportGeometrySummaryCache = #()
+fn GCMatterportGeometrySummary sceneNode = (
+	-- Geometry is recomputed on explicit Refresh; map/class checks remain live.
+	local sampleTime = timeStamp()
+	local cachedIndex = 0
+	for summaryIndex in 1 to GCMatterportGeometrySummaryCache.count where (GCMatterportGeometrySummaryCache[summaryIndex][1] == sceneNode) do cachedIndex = summaryIndex
+	if cachedIndex > 0 do (
+		local cached = GCMatterportGeometrySummaryCache[cachedIndex]
+		return cached[3]
+	)
+	local resultData = #(0, "Polys", #(), undefined)
+	local evaluatedMesh = undefined
+	try (
+		if (not isValidNode sceneNode or superclassOf sceneNode != GeometryClass) do throw "geometry unavailable"
+		if (classOf sceneNode == Editable_Poly or classOf sceneNode == PolyMeshObject) then (
+			resultData[1] = polyop.getNumFaces sceneNode
+			for faceIndex in 1 to resultData[1] do appendIfUnique resultData[3] (polyop.getFaceMatID sceneNode faceIndex)
+		) else (
+			evaluatedMesh = snapshotAsMesh sceneNode
+			resultData[1] = evaluatedMesh.numfaces
+			resultData[2] = "Tris"
+			for faceIndex in 1 to evaluatedMesh.numfaces do appendIfUnique resultData[3] (getFaceMatID evaluatedMesh faceIndex)
+		)
+	) catch (resultData[4] = getCurrentException() as string)
+	if evaluatedMesh != undefined do delete evaluatedMesh
+	local cacheRecord = #(sceneNode,sampleTime,resultData)
+	if cachedIndex == 0 then append GCMatterportGeometrySummaryCache cacheRecord else GCMatterportGeometrySummaryCache[cachedIndex] = cacheRecord
+	return resultData
+)
+
 fn GCMatterportGetMaterials selectedLayerNames = (
 	local materialEntries = #()
 	if (glTFMaterial == undefined) do return materialEntries
 	for selectedLayerName in selectedLayerNames do (
 		local lodLayer = LayerManager.getLayerFromName selectedLayerName
 		local layerNodes = #()
-		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
-		if (layerNodes.count == 1) do (
-			local sceneNode = layerNodes[1]
+		if lodLayer != undefined do lodLayer.nodes &layerNodes
+		for sceneNode in layerNodes do (
 			local parentMaterial = sceneNode.material
-			if (parentMaterial != undefined and classOf parentMaterial == MultiMaterial) do (
-				for slotIndex in 1 to parentMaterial.materialList.count do (
-					local subMaterial = parentMaterial.materialList[slotIndex]
-					if (slotIndex <= parentMaterial.materialIDList.count and subMaterial != undefined and classOf subMaterial == glTFMaterial) do (
-						local actualMaterialID = parentMaterial.materialIDList[slotIndex]
-						local rowText = (actualMaterialID as string) + ": " + subMaterial.name
-						local materialEntry = GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialRef: subMaterial slotIndex: slotIndex materialID: actualMaterialID materialName: subMaterial.name displayText: rowText
-						materialEntry.displayText = GCMatterportFormatMaterialRow materialEntry
-						append materialEntries materialEntry
-					)
+			if (parentMaterial == undefined or classOf parentMaterial != MultiMaterial) then (
+				append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "Multi/Sub-Object required" displayText: (sceneNode.name + " - Error: Multi/Sub-Object required"))
+			) else (
+				local allIDs = #()
+				for materialID in parentMaterial.materialIDList do appendIfUnique allIDs materialID
+				local geometrySummary = GCMatterportGeometrySummary sceneNode
+				for materialID in geometrySummary[3] do appendIfUnique allIDs materialID
+				sort allIDs
+				for materialID in allIDs do (
+					local slotIndex = findItem parentMaterial.materialIDList materialID
+					local subMaterial = if (slotIndex > 0 and slotIndex <= parentMaterial.materialList.count) then parentMaterial.materialList[slotIndex] else undefined
+					local materialIssue = GCMatterportMaterialIssue subMaterial
+					local matchingIDs = for assignedID in parentMaterial.materialIDList where assignedID == materialID collect assignedID
+					if matchingIDs.count > 1 do materialIssue = "duplicate Material ID"
+					local materialEntry = GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialRef: subMaterial slotIndex: slotIndex materialID: materialID validationError: materialIssue
+					materialEntry.displayText = GCMatterportFormatMaterialRow materialEntry
+					append materialEntries materialEntry
 				)
+				if allIDs.count == 0 do append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "empty Multi/Sub-Object" displayText: (sceneNode.name + " - Error: empty Multi/Sub-Object"))
 			)
 		)
 	)
 	return materialEntries
 )
-
 
 fn GCMatterportLODHasAO layerName = (
 	local materialEntries = GCMatterportGetMaterials #(layerName)
@@ -715,6 +802,17 @@ fn GCMatterportGetData = (
 		local layerNodes = #()
 		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
 		local isLayerReady = GCMatterportIsLODReady layerNodes
+		if isLayerReady do (
+			for materialEntry in (GCMatterportGetMaterials #(sceneLayerName)) where materialEntry.validationError != undefined do isLayerReady = false
+		)
+		local countCaption = ""
+		if isLayerReady do (
+			local summaryData = GCMatterportGeometrySummary layerNodes[1]
+			if summaryData[4] == undefined do (
+				local formattedCount = (dotNetClass "System.String").Format (dotNetClass "System.Globalization.CultureInfo").InvariantCulture "{0:N0}" (dotNetObject "System.Int32" summaryData[1])
+				countCaption = " (" + summaryData[2] + ": " + (substituteString formattedCount "," " ") + ")"
+			)
+		)
 		local displayPrefix = ""
 		if (layerNodes.count > 1) then (
 			displayPrefix = "[ERROR: More than one object] "
@@ -725,7 +823,7 @@ fn GCMatterportGetData = (
 		)
 		local glbPrefix = if (GCMatterportLODHasGLB sceneLayerName) then "[GLB] " else ""
 		local aoPrefix = if (isLayerReady and GCMatterportLODHasAO sceneLayerName) then "[AO] " else ""
-		GCMatterportLODEntry layerName: sceneLayerName displayText: (glbPrefix + aoPrefix + displayPrefix + sceneLayerName) objectCount: layerNodes.count isReady: isLayerReady
+		GCMatterportLODEntry layerName: sceneLayerName displayText: (glbPrefix + aoPrefix + displayPrefix + sceneLayerName + countCaption) objectCount: layerNodes.count isReady: isLayerReady
 	)
 )
 
@@ -820,7 +918,61 @@ fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
 global _rExportGCMatterportGLBConverter
 
 
+global GCMatterportMaterialContextEntry
+
+fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The object or material assignment changed. Refresh Materials and select the ID again."
+	local targetNode = materialEntry.nodeRef
+	local sourceMesh = undefined
+	local failureReason = undefined
+	try (
+		sourceMesh = snapshotAsMesh targetNode
+		local hasFaces = false
+		for faceIndex in 1 to sourceMesh.numfaces while not hasFaces do hasFaces = (getFaceMatID sourceMesh faceIndex == materialEntry.materialID)
+		if (not hasFaces) do throw "No faces use this Material ID."
+		if (not meshop.getMapSupport sourceMesh 2) do throw "UV channel 2 is missing. Preview does not create or unwrap UVs."
+		if (meshop.getNumMapVerts sourceMesh 2 == 0) do throw "UV channel 2 is empty."
+	) catch (failureReason = getCurrentException() as string)
+	if (sourceMesh != undefined) do delete sourceMesh
+	if (failureReason != undefined) do throw failureReason
+	local previewName = "GC Preview Unwrap Channel 2"
+	local previewModifier = undefined
+	for candidate in targetNode.modifiers where (classOf candidate == Unwrap_UVW and candidate.name == previewName) do (
+		if (previewModifier != undefined) do throw "Several preview modifiers exist. Keep one at the top of the stack."
+		previewModifier = candidate
+	)
+	if (previewModifier != undefined) do (
+		if (targetNode.modifiers[1] != previewModifier) do throw "Move GC Preview Unwrap Channel 2 to the top of the stack before previewing."
+		if (previewModifier.unwrap.getMapChannel() != 2) do throw "The preview modifier channel was changed. Restore channel 2 or remove that modifier."
+		if ((refs.dependentNodes previewModifier).count != 1) do throw "The preview modifier is instanced. Make it unique before previewing."
+	)
+	undo "Preview Unwrap Channel 2" on (
+		select targetNode
+		max modify mode
+		if (previewModifier == undefined) do (
+			previewModifier = Unwrap_UVW name: previewName
+			previewModifier.unwrap.setMapChannel 2
+			addModifier targetNode previewModifier before: 0
+		)
+		modPanel.setCurrentObject previewModifier
+		subObjectLevel = 3
+		previewModifier.unwrap2.setTVSubObjectMode 3
+		previewModifier.unwrap2.setTVElementMode false
+		previewModifier.unwrap2.setEnableSoftSelection false
+		previewModifier.unwrap2.setFilterSelected false
+		previewModifier.unwrap6.selectFacesByNode #{} targetNode
+		previewModifier.unwrap2.selectByMatID materialEntry.materialID
+		if ((previewModifier.unwrap6.getSelectedFacesByNode targetNode).numberSet == 0) do throw "Unwrap could not select this Material ID."
+		previewModifier.unwrap2.setFilterSelected true
+		previewModifier.unwrap.edit()
+	)
+	return true
+)
+
 rcmenu GCMatterportMaterialContextMenu (
+	menuItem previewUnwrapItem "Preview Unwrap Channel 2"
+	menuItem renderSelectedAOItem "Render AO for Selected IDs"
+	separator previewSeparator
 	submenu "Use Corona AO" (
 		menuItem aoEnable "Enable"
 		menuItem aoDisable "Disable"
@@ -851,10 +1003,12 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem denoiserEnable "Enable"
 		menuItem denoiserDisable "Disable"
 	)
-	separator renderAOSeparator
-	menuItem renderSelectedAOItem "Render AO for Selected IDs"
 	on GCMatterportMaterialContextMenu open do (
+		previewUnwrapItem.enabled = (GCMatterportMaterialContextEntry != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		renderSelectedAOItem.enabled = _rExportGCMatterportGLBConverter.btnRenderAO.enabled
+	)
+	on previewUnwrapItem picked do (
+		try (GCMatterportPreviewUnwrapChannel2 GCMatterportMaterialContextEntry) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 2" beep: false)
 	)
 	on renderSelectedAOItem picked do _rExportGCMatterportGLBConverter.renderSelectedAO()
 	on aoEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled true
@@ -963,6 +1117,11 @@ fn GCMatterportExportPreflight layerNames = (
 				)
 				if (validSlots) do (
 					exportMaterial = GCMatterportBuildExportMaterial sceneNode
+					try (GCMatterportAssertExportMaps parentMaterial entryCaption allowHeightNormal: true) catch (append issues (getCurrentException() as string))
+					for normalMap in (getClassInstances GCMatterportHeightNormal target: exportMaterial) do (
+						local normalIssue = GCMatterportHeightBitmapIssue normalMap.HeightBitmap
+						if (normalIssue != undefined) do append issues (entryCaption + ": " + normalIssue)
+					)
 					-- Excluded AO maps are already absent, so missing excluded AO files do not block export.
 					for bitmapMap in (getClassInstances Bitmaptexture target: exportMaterial) do (
 						local texturePath = mapPaths.getFullFilePath bitmapMap.filename
@@ -1030,6 +1189,8 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			-- All bitmap filenames point to owned copies before the native exporter is called.
 			local mapsFolder = stagingFolder + "maps\\"
 			makeDir mapsFolder all: true
+			GCMatterportBakeMaterialNormals temporaryNode.material mapsFolder exportJob.textureLimit
+			GCMatterportAssertExportMaps temporaryNode.material exportJob.nodeRef.name
 			local bitmapMaps = getClassInstances Bitmaptexture target: temporaryNode.material
 			for mapIndex in 1 to bitmapMaps.count do (
 				local bitmapMap = bitmapMaps[mapIndex]
@@ -1059,13 +1220,17 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 		try (
 			if (isValidNode temporaryNode) do delete temporaryNode
 			if (temporaryLayer != undefined) do LayerManager.deleteLayerByName temporaryLayer.name
-		) catch (failureReason = "Could not remove temporary export geometry: " + (getCurrentException() as string))
+		) catch (failureReason = (if failureReason == undefined then "" else failureReason + "\n") + "Could not remove temporary export geometry: " + (getCurrentException() as string))
 		try (
 			select (for sceneNode in originalSelection where (isValidNode sceneNode) collect sceneNode)
 			setCommandPanelTaskMode mode: originalPanelMode
 			if (originalPanelMode == #modify and originalStackObject != undefined) do modPanel.setCurrentObject originalStackObject
-			subObjectLevel = originalSubObjectLevel
-		) catch (failureReason = "Could not fully restore the original selection/panel: " + (getCurrentException() as string))
+			if (originalPanelMode == #modify) do (
+				-- No sub-object level exists outside a compatible Modify context.
+				if (originalSubObjectLevel != undefined) then subObjectLevel = originalSubObjectLevel
+				else if (subObjectLevel != undefined) do subObjectLevel = 0
+			)
+		) catch (failureReason = (if failureReason == undefined then "" else failureReason + "\n") + "Could not fully restore the original selection/panel: " + (getCurrentException() as string))
 	)
 	try (
 		local pathClass = dotNetClass "System.IO.Path"
@@ -1085,6 +1250,114 @@ global GCMatterportPreviewProcess
 global GCMatterportPreviewPort
 global GCMatterportPreviewRoot
 global GCMatterportPreviewToken
+
+global GCMatterportPCPreviewProcess
+global GCMatterportPCPreviewPort
+global GCMatterportPCPreviewRoot
+global GCMatterportPCPreviewToken
+global GCMatterportLiveSession
+global GCMatterportLiveStop
+global GCMatterportPreviewServerReady
+global GCMatterportPreviewStartBusy = false
+global GCMatterportPreviewLastProbeError = ""
+
+-- Stop only localhost binaries belonging to this converter installation.
+-- Enumerating by path also recovers processes left behind after script reloads.
+fn GCMatterportStopAllPreviewServers = (
+	local pathClass = dotNetClass "System.IO.Path"
+	local ownedExecutables = for relativeFolder in #("model-viewer\\", "playcanvas-viewer\\") collect (toLower (pathClass.GetFullPath (GCMatterportRuntimeFolder + relativeFolder + "localhost.exe")))
+	local failureReason = undefined
+	for serverProcess in ((dotNetClass "System.Diagnostics.Process").GetProcessesByName "localhost") do (
+		local executablePath = undefined
+		try (
+			if (not serverProcess.HasExited) do executablePath = toLower (pathClass.GetFullPath (serverProcess.MainModule.FileName as string))
+		) catch (format "Preview ownership could not be inspected for PID %: %\n" serverProcess.Id (getCurrentException()))
+		if (executablePath != undefined and (findItem ownedExecutables executablePath) > 0) do (
+			try (
+				if (not serverProcess.HasExited) do (
+					serverProcess.Kill()
+					if (not serverProcess.WaitForExit 3000) do throw "The previous converter viewer server did not exit within 3 seconds."
+				)
+			) catch (
+				failureReason = (if failureReason == undefined then "" else failureReason + "\n") + "Could not stop converter viewer PID " + (serverProcess.Id as string) + ": " + (getCurrentException() as string)
+			)
+		)
+		serverProcess.Dispose()
+	)
+	if (failureReason != undefined) do throw failureReason
+	for storedProcess in #(GCMatterportPreviewProcess, GCMatterportPCPreviewProcess) where (storedProcess != undefined) do storedProcess.Dispose()
+	GCMatterportPreviewProcess = undefined
+	GCMatterportPreviewPort = undefined
+	GCMatterportPCPreviewProcess = undefined
+	GCMatterportPCPreviewPort = undefined
+	return true
+)
+
+fn GCMatterportStartPreviewServer viewerFolder = (
+	if GCMatterportPreviewStartBusy do throw "A Model Viewer server is already starting."
+	GCMatterportPreviewStartBusy = true
+	local startedServer = undefined
+	local resultData = undefined
+	local failureReason = undefined
+	try (
+		local serverExecutable = viewerFolder + "localhost.exe"
+		if (not doesFileExist serverExecutable) do throw ("Missing Model Viewer server: " + serverExecutable)
+		-- The bundled server exits immediately when another instance owns its folder.
+		GCMatterportStopAllPreviewServers()
+		local readyToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
+		(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") readyToken
+		local attemptReport = ""
+		for attemptIndex in 1 to 3 while (resultData == undefined) do (
+			local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
+			listener.Start()
+			local portNumber = listener.LocalEndpoint.Port
+			listener.Stop()
+			local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+			startInfo.FileName = serverExecutable
+			startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
+			startInfo.WorkingDirectory = viewerFolder
+			startInfo.UseShellExecute = false
+			startInfo.CreateNoWindow = true
+			startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
+			startInfo.RedirectStandardError = true
+			startInfo.RedirectStandardOutput = true
+			startedServer = (dotNetClass "System.Diagnostics.Process").Start startInfo
+			local stderrTask = startedServer.StandardError.ReadToEndAsync()
+			local stdoutTask = startedServer.StandardOutput.ReadToEndAsync()
+			for waitIndex in 1 to 30 while (resultData == undefined and not startedServer.HasExited) do (
+				if (GCMatterportPreviewServerReady portNumber readyToken) then (
+					resultData = #(startedServer, portNumber, readyToken)
+				) else sleep 0.1
+			)
+			if (resultData == undefined) do (
+				local attemptReason = if startedServer.HasExited then ("process exited with code " + (startedServer.ExitCode as string)) else ("HTTP readiness failed: " + GCMatterportPreviewLastProbeError)
+				if (not startedServer.HasExited) do startedServer.Kill()
+				if (not startedServer.WaitForExit 3000) do throw "The failed viewer server did not exit within 3 seconds."
+				if stderrTask.IsCompleted do (
+					local errorText = stderrTask.Result as string
+					if (errorText != "") do attemptReason += "\n" + (substring errorText 1 (amin errorText.count 1200))
+				)
+				attemptReport += "\nAttempt " + (attemptIndex as string) + ", 127.0.0.1:" + (portNumber as string) + ": " + attemptReason
+				startedServer.Dispose()
+				startedServer = undefined
+			)
+		)
+		if (resultData == undefined) do throw ("The local Model Viewer server could not start.\nExecutable: " + serverExecutable + "\nFolder: " + viewerFolder + attemptReport)
+		callbacks.removeScripts id: #GCMatterportPreviewShutdown
+		callbacks.removeScripts id: #GCMatterportPCPreviewShutdown
+		callbacks.addScript #preSystemShutdown "GCMatterportStopAllPreviewServers()" id: #GCMatterportPreviewShutdown
+	) catch (failureReason = getCurrentException() as string)
+	if (failureReason != undefined and startedServer != undefined) do (
+		try (
+			if (not startedServer.HasExited) do startedServer.Kill()
+			startedServer.WaitForExit 3000
+			startedServer.Dispose()
+		) catch (failureReason += "\nServer cleanup: " + (getCurrentException() as string))
+	)
+	GCMatterportPreviewStartBusy = false
+	if (failureReason != undefined) do throw failureReason
+	return resultData
+)
 
 fn GCMatterportStopPreviewServer = (
 	if (GCMatterportPreviewProcess != undefined) do (
@@ -1110,50 +1383,20 @@ fn GCMatterportPreviewServerReady portNumber expectedToken = (
 		response = request.GetResponse()
 		reader = dotNetObject "System.IO.StreamReader" (response.GetResponseStream())
 		isReady = ((reader.ReadToEnd()) == expectedToken)
-	) catch (isReady = false)
+		if (not isReady) do GCMatterportPreviewLastProbeError = "readiness token mismatch"
+	) catch (isReady = false; GCMatterportPreviewLastProbeError = getCurrentException() as string)
 	if (reader != undefined) do reader.Dispose()
 	if (response != undefined) do response.Dispose()
 	return isReady
 )
 
 fn GCMatterportEnsurePreviewServer viewerFolder = (
-	if (GCMatterportPreviewProcess != undefined) do (
-		if (not GCMatterportPreviewProcess.HasExited and GCMatterportPreviewRoot == viewerFolder) do (
-			if (GCMatterportPreviewServerReady GCMatterportPreviewPort GCMatterportPreviewToken) do return GCMatterportPreviewPort
-		)
-		GCMatterportStopPreviewServer()
-	)
-	local serverExecutable = viewerFolder + "localhost.exe"
+	local serverData = GCMatterportStartPreviewServer viewerFolder
+	GCMatterportPreviewProcess = serverData[1]
+	GCMatterportPreviewPort = serverData[2]
+	GCMatterportPreviewToken = serverData[3]
 	GCMatterportPreviewRoot = viewerFolder
-	GCMatterportPreviewToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
-	(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") GCMatterportPreviewToken
-	-- Choose a free port; retry if another process takes it between reservation and launch.
-	for attemptIndex in 1 to 3 do (
-		local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
-		listener.Start()
-		local localEndpoint = listener.LocalEndpoint
-		local portNumber = localEndpoint.Port
-		listener.Stop()
-		local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
-		startInfo.FileName = serverExecutable
-		startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
-		startInfo.WorkingDirectory = viewerFolder
-		startInfo.UseShellExecute = false
-		startInfo.CreateNoWindow = true
-		startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
-		GCMatterportPreviewProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
-		for waitIndex in 1 to 15 while (not GCMatterportPreviewProcess.HasExited) do (
-			if (GCMatterportPreviewServerReady portNumber GCMatterportPreviewToken) do (
-				GCMatterportPreviewPort = portNumber
-				callbacks.removeScripts id: #GCMatterportPreviewShutdown
-				callbacks.addScript #preSystemShutdown "GCMatterportStopPreviewServer()" id: #GCMatterportPreviewShutdown
-				return portNumber
-			)
-			sleep 0.1
-		)
-		GCMatterportStopPreviewServer()
-	)
-	throw "The local Model Viewer server could not start. Check that localhost.exe is allowed to listen on the loopback interface."
+	return serverData[2]
 )
 
 
@@ -1163,7 +1406,7 @@ fn GCMatterportLiveBrowserScript = (
 )
 
 fn GCMatterportGoogleViewerHTML = (
- return "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Google Model Viewer</title><link rel=\"icon\" href=\"/favicon-16x16.png\">\n<style>html,body{padding:0;margin:0;background:#f7f7f7}model-viewer{width:100vw;height:100vh}#error{position:fixed;top:16px;left:16px;right:16px;padding:12px;background:white;color:#900;font:14px sans-serif}</style>\n</head><body>\n<model-viewer alt=\"\" shadow-intensity=\"1\" camera-controls environment-image=\"hdri/studio.hdr\" camera-orbit=\"-36deg 72deg\" field-of-view=\"30deg\" exposure=\"0.4\" tone-mapping=\"aces\" min-field-of-view=\"50deg\" max-field-of-view=\"50deg\" touch-action=\"pan-y\"></model-viewer>\n<div id=\"error\" hidden></div>\n<script type=\"module\">\nconst errorBox=document.querySelector('#error');\nconst reportError=message=>{errorBox.textContent=message;errorBox.hidden=false;};\ntry {\n const response=await fetch('/js/engine.js');\n if(!response.ok) throw new Error('Cannot load Model Viewer engine: '+response.status);\n const engineURL=URL.createObjectURL(new Blob([await response.text()],{type:'application/javascript'}));\n try {await import(engineURL);} finally {URL.revokeObjectURL(engineURL);}\n customElements.get('model-viewer').ktx2TranscoderLocation='/js/basis/';\n const parameters=new URLSearchParams(location.search), model=parameters.get('model'), live=parameters.get('live');\n const viewer=document.querySelector('model-viewer');\n document.title=(parameters.get('title')||'Model Viewer')+' - Google Model Viewer';\n viewer.alt=document.title;window.devicePixelRatio=2;\n viewer.addEventListener('error',()=>reportError('The exported GLB could not be loaded.'));\n if(live && /^[a-f0-9]{32}$/.test(live)) viewer.src='/live/'+live+'/geometry/scene.glb';\n else if(model && /^[a-f0-9]{64}$/.test(model)) viewer.src='/models/'+model+'.glb?v='+encodeURIComponent(parameters.get('v')||'');\n else throw new Error('A valid exported LOD or Live Preview session is required.');\n} catch(error) {reportError(error.message||'Model Viewer could not start.');}\n</script><script src=\"/js/live-sync.js\"></script>\n</body></html>\n"
+ return "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Google Model Viewer</title><link rel=\"icon\" href=\"/favicon-16x16.png\">\n<style>html,body{padding:0;margin:0;background:#f7f7f7}model-viewer{width:100vw;height:100vh}#error{position:fixed;top:16px;left:16px;right:16px;padding:12px;background:white;color:#900;font:14px sans-serif}</style>\n</head><body>\n<model-viewer alt=\"\" shadow-intensity=\"1\" camera-controls environment-image=\"hdri/studio.hdr\" camera-orbit=\"-36deg 72deg\" field-of-view=\"30deg\" exposure=\"0.4\" tone-mapping=\"aces\" min-field-of-view=\"50deg\" max-field-of-view=\"50deg\" touch-action=\"pan-y\"></model-viewer>\n<div id=\"error\" hidden></div>\n<script type=\"module\">\nconst errorBox=document.querySelector('#error');\nconst reportError=message=>{errorBox.textContent=message;errorBox.hidden=false;};\ntry {\n const response=await fetch('/js/engine.js');\n if(!response.ok) throw new Error('Cannot load Model Viewer engine: '+response.status);\n const engineURL=URL.createObjectURL(new Blob([await response.text()],{type:'application/javascript'}));\n try {await import(engineURL);} finally {URL.revokeObjectURL(engineURL);}\n customElements.get('model-viewer').ktx2TranscoderLocation='/js/basis/';\n const parameters=new URLSearchParams(location.search), model=parameters.get('model'), live=parameters.get('live');\n const viewer=document.querySelector('model-viewer');\n document.title=(parameters.get('title')||'Model Viewer')+' - Google Model Viewer';\n viewer.alt=document.title;window.devicePixelRatio=2;\n viewer.addEventListener('error',()=>reportError('The exported GLB could not be loaded.'));\n if(live && /^[a-f0-9]{32}$/.test(live)) {viewer.minCameraOrbit='auto auto 1%';viewer.src='/live/'+live+'/geometry/scene.glb';}\n else if(model && /^[a-f0-9]{64}$/.test(model)) viewer.src='/models/'+model+'.glb?v='+encodeURIComponent(parameters.get('v')||'');\n else throw new Error('A valid exported LOD or Live Preview session is required.');\n} catch(error) {reportError(error.message||'Model Viewer could not start.');}\n</script><script src=\"/js/live-sync.js\"></script>\n</body></html>\n"
 )
 
 fn GCMatterportViewerFiles = (
@@ -1284,6 +1527,7 @@ fn GCMatterportEnsureViewerInstalled = (
 )
 
 fn GCMatterportPreviewLOD layerName = (
+	if (GCMatterportLiveSession != undefined) do GCMatterportLiveStop()
 	if (not GCMatterportLODHasGLB layerName) do throw "Export this LOD to GLB before opening its preview."
 	GCMatterportEnsureViewerInstalled()
 	local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
@@ -1349,50 +1593,20 @@ fn GCMatterportPCPreviewServerReady portNumber expectedToken = (
 		response = request.GetResponse()
 		reader = dotNetObject "System.IO.StreamReader" (response.GetResponseStream())
 		isReady = ((reader.ReadToEnd()) == expectedToken)
-	) catch (isReady = false)
+		if (not isReady) do GCMatterportPreviewLastProbeError = "readiness token mismatch"
+	) catch (isReady = false; GCMatterportPreviewLastProbeError = getCurrentException() as string)
 	if (reader != undefined) do reader.Dispose()
 	if (response != undefined) do response.Dispose()
 	return isReady
 )
 
 fn GCMatterportEnsurePCPreviewServer viewerFolder = (
-	if (GCMatterportPCPreviewProcess != undefined) do (
-		if (not GCMatterportPCPreviewProcess.HasExited and GCMatterportPCPreviewRoot == viewerFolder) do (
-			if (GCMatterportPCPreviewServerReady GCMatterportPCPreviewPort GCMatterportPCPreviewToken) do return GCMatterportPCPreviewPort
-		)
-		GCMatterportStopPCPreviewServer()
-	)
-	local serverExecutable = viewerFolder + "localhost.exe"
+	local serverData = GCMatterportStartPreviewServer viewerFolder
+	GCMatterportPCPreviewProcess = serverData[1]
+	GCMatterportPCPreviewPort = serverData[2]
+	GCMatterportPCPreviewToken = serverData[3]
 	GCMatterportPCPreviewRoot = viewerFolder
-	GCMatterportPCPreviewToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
-	(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") GCMatterportPCPreviewToken
-	-- Choose a free port; retry if another process takes it between reservation and launch.
-	for attemptIndex in 1 to 3 do (
-		local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
-		listener.Start()
-		local localEndpoint = listener.LocalEndpoint
-		local portNumber = localEndpoint.Port
-		listener.Stop()
-		local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
-		startInfo.FileName = serverExecutable
-		startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
-		startInfo.WorkingDirectory = viewerFolder
-		startInfo.UseShellExecute = false
-		startInfo.CreateNoWindow = true
-		startInfo.WindowStyle = (dotNetClass "System.Diagnostics.ProcessWindowStyle").Hidden
-		GCMatterportPCPreviewProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
-		for waitIndex in 1 to 15 while (not GCMatterportPCPreviewProcess.HasExited) do (
-			if (GCMatterportPCPreviewServerReady portNumber GCMatterportPCPreviewToken) do (
-				GCMatterportPCPreviewPort = portNumber
-				callbacks.removeScripts id: #GCMatterportPCPreviewShutdown
-				callbacks.addScript #preSystemShutdown "GCMatterportStopPCPreviewServer()" id: #GCMatterportPCPreviewShutdown
-				return portNumber
-			)
-			sleep 0.1
-		)
-		GCMatterportStopPCPreviewServer()
-	)
-	throw "The local Model Viewer server could not start. Check that localhost.exe is allowed to listen on the loopback interface."
+	return serverData[2]
 )
 
 
@@ -1447,6 +1661,7 @@ fn GCMatterportEnsurePCViewerInstalled = (
 	return true
 )
 fn GCMatterportPreviewPCLOD layerName openBrowser: true = (
+	if (GCMatterportLiveSession != undefined) do GCMatterportLiveStop()
 	if (not GCMatterportLODHasGLB layerName) do throw "Export this LOD to GLB before opening its preview."
 	GCMatterportEnsurePCViewerInstalled()
 	local viewerFolder = GCMatterportRuntimeFolder + "playcanvas-viewer\\"
@@ -1950,11 +2165,11 @@ fn GCMatterportLiveOpen layerName openBrowser: true = (
  return previewURL
 )
 
-rollout GCMatterportLiveRollout "Google Live Preview Materials" (
- label lblLiveInfo "Select one LOD and open it. Material edits then sync automatically." width: 330 height: 32
+rollout GCMatterportLiveRollout "Live Preview Materials" (
+ label lblLiveInfo "Select one LOD and open it.\nMaterial edits sync automatically." width: 320 height: 28
  button btnOpenLive "Open Live Preview" width: 156 across: 2
  button btnUpdateLive "Refresh Textures" width: 156
- label lblLiveStatus "Initial geometry loads once. Keep this window open to sync." width: 330 height: 44
+ label lblLiveStatus "Geometry loads once.\nKeep this window open to sync." width: 320 height: 28
  timer tmrLive interval: 50 active: false
  on btnOpenLive pressed do (
   try (
@@ -1976,6 +2191,7 @@ rollout GCMatterportLiveRollout "Google Live Preview Materials" (
  on btnUpdateLive pressed do (
   try (GCMatterportLiveUpdate forceCheck: true) catch (messageBox (getCurrentException() as string) title: "Refresh Textures")
  )
+ on GCMatterportLiveRollout open do setDialogSize GCMatterportLiveRollout [344, (lblLiveStatus.pos.y + lblLiveStatus.height + 8)]
  on GCMatterportLiveRollout close do GCMatterportLiveStop()
 )
 
@@ -2002,7 +2218,7 @@ rcmenu GCMatterportLODContextMenu (
 	)
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
 	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
-	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 354 142)
+	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 344 110)
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
 	on pastePropertiesItem picked do _rExportGCMatterportGLBConverter.pasteLODProperties()
 	on deleteLODsItem picked do _rExportGCMatterportGLBConverter.deleteSelectedLODs()
@@ -2159,14 +2375,15 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	
 	group "Materials" (
 		multiListbox lbxMaterials "" items: #() height: 6 offset: [-2, 0] width: 326
-		button btnTransferUV "Transfer UV Channel from 1 -> 2" width: 310 align: #center
+		button btnTransferUV "Transfer All IDs: Channel 1 -> 2" width: 310 align: #center
 	)
 
 	group "Corona AO Settings" (
 		checkbox cbxUseCoronaAO "Use Corona AO" width: 115 align: #left across: 2 checked: true enabled: false
 		label lblAOSelection "Select one material." align: #right width: 188
-		checkbox cbxAOOverride "Override Resolution" enabled: false across: 2 align: #left
-		dropdownlist ddlAOResolution "" items: #("512", "1024", "2048", "4096") selection: 2 width: 100 enabled: false align: #right
+		checkbox cbxAOOverride "Override Resolution" width: 125 enabled: false across: 3 align: #left
+		dropdownlist ddlAOResolution "" items: #("512", "1024", "2048", "4096") selection: 2 width: 64 enabled: false align: #left
+		label lblDefaultAOResolution "" width: 104 align: #left visible: false
 		spinner spnAOPasses "Passes: " range: [1, 9999, 15] type: #integer fieldWidth: 42 width: 84 align: #left across: 3 enabled: false
 		spinner spnAOSize "Size (cm): " range: [0.01, 9999.0, 5.0] type: #float fieldWidth: 46 width: 99 align: #left enabled: false
 		checkbox cbxAODenoise "V-Ray Denoiser" toolTip: "Use V-Ray Denoiser" width: 108 align: #left checked: true enabled: false
@@ -2244,6 +2461,9 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			spnAOPasses.value = aoOptions.passes
 			spnAOSize.value = aoOptions.sizeCM
 			cbxAOOverride.checked = aoOptions.customResolution
+			local defaultResolution = GCMatterportAutomaticAOResolution materialEntry.layerName
+			lblDefaultAOResolution.text = "Default: " + (if defaultResolution == undefined then "N/A" else defaultResolution as string)
+			lblDefaultAOResolution.visible = cbxAOOverride.checked
 			cbxAODenoise.checked = aoOptions.useVRayDenoiser
 			ddlAOResolution.selection = findItem #(512, 1024, 2048, 4096) aoOptions.resolution
 		) else (
@@ -2254,6 +2474,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			ddlAOResolution.selection = 2
 			cbxUseCoronaAO.checked = true
 			cbxAOOverride.checked = false
+			lblDefaultAOResolution.visible = false
 			cbxAODenoise.checked = true
 		)
 		isLoadingAO = false
@@ -2374,6 +2595,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 					refreshAOSettings()
 					local wasTimerActive = tmrLODRefresh.active
 					tmrLODRefresh.active = false
+					GCMatterportMaterialContextEntry = materialEntries[rowIndex]
 					try (popUpMenu GCMatterportMaterialContextMenu) catch (format "Materials menu: %\n" (getCurrentException()))
 					tmrLODRefresh.active = wasTimerActive
 				)
@@ -2483,11 +2705,27 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		refreshLODs()
 		tmrLODRefresh.active = previousTimerActive
 		redrawViews()
-		local summaryText = "WebGL GLB exported: " + (completedCount as string) + " of " + (exportJobs.count as string) + "."
-		if (completedCount > 0) do summaryText += "\nOutput: " + exportFolder
+		local allCompleted = (completedCount == exportJobs.count and reportLines.count == 0)
+		local summaryText = if allCompleted then "Batch export completed." else "Batch export stopped before completion."
+		summaryText += "\nWebGL GLB exported: " + (completedCount as string) + " of " + (exportJobs.count as string) + "."
+		if (reportLines.count > 0) do (
+			summaryText += "\nFailed or cancelled: " + (reportLines.count as string) + "."
+			local notAttemptedCount = amax 0 (exportJobs.count - completedCount - reportLines.count)
+			if (notAttemptedCount > 0) do summaryText += " Not attempted: " + (notAttemptedCount as string) + "."
+		)
+		if (completedCount > 0) do summaryText += "\n\nOutput: " + exportFolder
 		for reportLine in reportLines do summaryText += "\n" + reportLine
-		messageBox summaryText title: "Batch Export LODs" beep: false
-		return (completedCount == exportJobs.count)
+		if (completedCount > 0) then (
+			if (queryBox (summaryText + "\n\nOpen this folder?") title: "Batch Export LODs" beep: false defaultButton: 2) do (
+				try (
+					if (not doesDirectoryExist exportFolder) do throw "The export folder no longer exists."
+					ShellLaunch "explorer.exe" ("\"" + (trimRight exportFolder "\\") + "\"")
+				) catch (messageBox ("Could not open the export folder.\n" + (getCurrentException() as string)) title: "Batch Export LODs" beep: false)
+			)
+		) else (
+			messageBox summaryText title: "Batch Export LODs" beep: false
+		)
+		return allCompleted
 	)
 
 	on btnBatchExport pressed do batchExportLODs()
@@ -2843,28 +3081,24 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on btnAddToLOD pressed do addSelectedObjectToLOD()
 
 
-	fn transferSelectedMaterialUVs = (
-		local selectedRows = lbxMaterials.selection as array
+	fn transferAllMaterialUVs showSummary: true = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = lbxLODs.selection as array
 		if (selectedRows.count == 0) do (
-			messageBox "Select one or more material IDs in Materials." title: "Transfer UV Channel" beep: false
+			messageBox "Select one or more target LODs." title: "Transfer All IDs" beep: false
 			return false
 		)
 		local targetNodes = #()
-		local nodeMaterialIDs = #()
 		for rowIndex in selectedRows do (
-			if (rowIndex < 1 or rowIndex > materialEntries.count or not GCMatterportIsCurrentMaterialEntry materialEntries[rowIndex]) do (
-				refreshMaterials()
-				messageBox "The material selection is out of date. Select the IDs again." title: "Transfer UV Channel" beep: false
+			if (rowIndex < 1 or rowIndex > lodEntries.count) do throw "The LOD list is out of date. Refresh it."
+			local lodLayer = LayerManager.getLayerFromName lodEntries[rowIndex].layerName
+			local layerNodes = #()
+			if (lodLayer != undefined) do lodLayer.nodes &layerNodes
+			if (layerNodes.count != 1 or not isValidNode layerNodes[1]) do (
+				messageBox "Each selected LOD must contain exactly one object." title: "Transfer All IDs" beep: false
 				return false
 			)
-			local materialEntry = materialEntries[rowIndex]
-			local targetIndex = findItem targetNodes materialEntry.nodeRef
-			if (targetIndex == 0) do (
-				append targetNodes materialEntry.nodeRef
-				append nodeMaterialIDs #()
-				targetIndex = targetNodes.count
-			)
-			appendIfUnique nodeMaterialIDs[targetIndex] materialEntry.materialID
+			appendIfUnique targetNodes layerNodes[1]
 		)
 		local previousSelection = selection as array
 		local previousPanelMode = getCommandPanelTaskMode()
@@ -2876,7 +3110,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local completedNodes = #()
 		tmrLODRefresh.active = false
-		undo "Transfer UV 1 to 2 and pack selected material IDs" on (
+		undo "Transfer UV 1 to 2 and pack all material IDs" on (
 			for targetIndex in 1 to targetNodes.count do (
 				local targetNode = targetNodes[targetIndex]
 				local originalModifiers = for existingModifier in targetNode.modifiers collect existingModifier
@@ -2887,12 +3121,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 					sourceMesh = snapshotAsMesh targetNode
 					if (sourceMesh.numfaces == 0 or not meshop.getMapSupport sourceMesh 1 or meshop.getNumMapVerts sourceMesh 1 == 0) do throw "UV channel 1 is missing or empty."
 					local validIDs = #()
-					for materialID in nodeMaterialIDs[targetIndex] do (
-						local hasFaces = false
-						for faceIndex in 1 to sourceMesh.numfaces while (not hasFaces) do hasFaces = (getFaceMatID sourceMesh faceIndex == materialID)
-						if hasFaces then append validIDs materialID else append reportLines (targetNode.name + ": ID " + (materialID as string) + " has no faces; skipped.")
-					)
-					if (validIDs.count == 0) do throw "No selected material IDs have faces."
+					for faceIndex in 1 to sourceMesh.numfaces do appendIfUnique validIDs (getFaceMatID sourceMesh faceIndex)
+					sort validIDs
 					-- Leave lower stack editing before creating a topology-dependent modifier.
 					subObjectLevel = 0
 					setCommandPanelTaskMode mode: #create
@@ -2907,6 +3137,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 					if (not isExactCopy) do throw "Channel 2 does not match source channel 1 after paste."
 					local unwrapModifier = Unwrap_UVW()
 					unwrapModifier.name = "Material ID UV packing (channel 2)"
+					unwrapModifier.unwrap2.setAlwaysEdit false
 					unwrapModifier.unwrap.setMapChannel 2
 					operationStage = "Add channel 2 Unwrap at top of stack"
 					addModifier targetNode unwrapModifier before: 0
@@ -2977,7 +3208,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 					subObjectLevel = 0
 				) else (
 					if (previousStackObject != undefined) do modPanel.setCurrentObject previousStackObject
-					subObjectLevel = previousSubObjectLevel
+					if (previousSubObjectLevel != undefined) then subObjectLevel = previousSubObjectLevel
+					else if (subObjectLevel != undefined) do subObjectLevel = 0
 				)
 			)
 		) catch (
@@ -2988,13 +3220,15 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		refreshMaterials()
 		tmrLODRefresh.active = previousTimerActive
 		redrawViews()
-		local resultMessage = "UV channel 1 copied to 2, selected IDs packed, and converted to Editable Poly on " + (completedCount as string) + " object(s)."
+		local resultMessage = "UV channel 1 copied to 2, all IDs packed, and converted to Editable Poly on " + (completedCount as string) + " object(s)."
 		for reportLine in reportLines do resultMessage += "\n" + reportLine
-		messageBox resultMessage title: "Transfer UV Channel" beep: false
+		if showSummary do messageBox resultMessage title: "Transfer All IDs" beep: false
 		return (reportLines.count == 0)
 	)
 
-	on btnTransferUV pressed do transferSelectedMaterialUVs()
+	on btnTransferUV pressed do (
+		if (queryBox "Transfer UV Channel 1 to Channel 2 for all material IDs?\n\nThis operation may take some time. Please wait until it finishes and do not interact with 3ds Max." title: "Transfer All IDs" beep: false defaultButton: 2) do transferAllMaterialUVs()
+	)
 
 	fn openMaterialInSlate rowIndex = (
 		if (rowIndex < 1 or rowIndex > materialEntries.count) do (
@@ -3003,6 +3237,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			return false
 		)
 		local clickedEntry = materialEntries[rowIndex]
+		if (clickedEntry.slotIndex < 1 or clickedEntry.materialRef == undefined) do (messageBox clickedEntry.displayText title: "Materials" beep: false; return false)
 		local freshEntries = GCMatterportGetMaterials #(clickedEntry.layerName)
 		local isCurrentEntry = false
 		for freshEntry in freshEntries do (
@@ -3115,9 +3350,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 
 	on lbxLODs selected rowIndex do refreshMaterials()
 
-	on btnRefresList pressed do refreshLODs()
+	on btnRefresList pressed do (GCMatterportGeometrySummaryCache = #(); refreshLODs())
 	on tmrLODRefresh tick do (
 		try (
+			GCMatterportSyncHeightNormalMaps()
 			if (not syncSceneSelection()) do refreshLODs()
 		) catch (
 			tmrLODRefresh.active = false
@@ -3132,12 +3368,16 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		spnAOSize.pos = passesPosition + [113, 0]
 		cbxAODenoise.pos = [225, passesPosition.y]
 		ddlAOResolution.pos = cbxAOOverride.pos + [127, 0]
+		lblDefaultAOResolution.pos = ddlAOResolution.pos + [70, 3]
 		previousSceneSelection = undefined
 		syncSceneSelection()
 		tmrLODRefresh.active = true
 	)
 
 	on _rExportGCMatterportGLBConverter close do (
+		if GCMatterportLiveRollout != undefined do (
+			try (destroyDialog GCMatterportLiveRollout) catch (format "Live Preview window cleanup: %\n" (getCurrentException()))
+		)
 		tmrLODRefresh.active = false
 		previousSceneSelection = undefined
 	)
@@ -3243,7 +3483,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
 			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
 			if (hasNewVersion) do (
-				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Matterport-GLB-Converter.ms")
+				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Height-to-Normal.ms", "GC-Height-to-Normal.osl", "GC-Matterport-GLB-Converter.ms")
 				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
 				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
 				for fileName in updateFiles do (

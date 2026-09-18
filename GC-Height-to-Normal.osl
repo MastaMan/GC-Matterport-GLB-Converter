@@ -1,0 +1,58 @@
+// GC Matterport Height to Normal, shader format version 1.
+// Raw height values; +Y (OpenGL/glTF) tangent-space output.
+float gcHeight(string filePath, float su, float sv, float radius, float dx, float dy, string wrapU, string wrapV)
+{
+    color total = 0;
+    for (int iy = -1; iy <= 1; iy++)
+        for (int ix = -1; ix <= 1; ix++) {
+            float weight = (ix == 0 ? 2 : 1) * (iy == 0 ? 2 : 1);
+            total += weight * texture(filePath, su + ix*radius*dx, 1-(sv + iy*radius*dy),
+                0,0,0,0, "colorspace","Raw", "interp","bilinear", "swrap",wrapU, "twrap",wrapV);
+        }
+    return (total[0] + total[1] + total[2]) / 48;
+}
+float gcFiltered(string filePath, float su, float sv, float blurRadius, float sharpness, float dx, float dy, string wrapU, string wrapV)
+{
+    float base = gcHeight(filePath,su,sv,blurRadius,dx,dy,wrapU,wrapV);
+    if (sharpness > 0) {
+        float soft = gcHeight(filePath,su,sv,blurRadius+1,dx,dy,wrapU,wrapV);
+        base += sharpness*(base-soft);
+    }
+    return base;
+}
+shader GCMatterportHeightNormal_v1
+[[ string label="GC Height to Normal", string help="Internal shader for the GC Height to Normal Bitmap wrapper." ]]
+(
+    string SourceFile = "" [[ string widget="filename" ]],
+    float Strength = 2,
+    float Blur = 0,
+    float Sharpness = 0,
+    int FlipGreen = 0,
+    int MapChannel = 1,
+    int BakeCanonical = 0,
+    float TileU = 1, float TileV = 1,
+    float OffsetU = 0, float OffsetV = 0, float Rotation = 0,
+    string WrapU = "periodic", string WrapV = "periodic",
+    output color Normal = color(0.5,0.5,1)
+)
+{
+    if (SourceFile == "") return;
+    int resolution[2] = {1024,1024};
+    gettextureinfo(SourceFile,"resolution",resolution);
+    float dx=1.0/max(resolution[0],1), dy=1.0/max(resolution[1],1);
+    point uv=point(u,v,0);
+    if (!BakeCanonical) {
+        if (!getattribute(format("UV%d",MapChannel),uv) && MapChannel!=1)
+            getattribute(format("uv_%d",MapChannel),uv);
+        float angle=radians(Rotation);
+        float px=(uv[0]-0.5)*TileU, py=(uv[1]-0.5)*TileV;
+        uv=point(px*cos(angle)+py*sin(angle)+0.5+OffsetU, py*cos(angle)-px*sin(angle)+0.5+OffsetV,0);
+    }
+    float gx=(gcFiltered(SourceFile,uv[0]+dx,uv[1],Blur,Sharpness,dx,dy,WrapU,WrapV)
+             -gcFiltered(SourceFile,uv[0]-dx,uv[1],Blur,Sharpness,dx,dy,WrapU,WrapV))*0.5;
+    float gy=(gcFiltered(SourceFile,uv[0],uv[1]+dy,Blur,Sharpness,dx,dy,WrapU,WrapV)
+             -gcFiltered(SourceFile,uv[0],uv[1]-dy,Blur,Sharpness,dx,dy,WrapU,WrapV))*0.5;
+    vector tangentNormal=normalize(vector(-gx*Strength,-gy*Strength,1));
+    if (FlipGreen) tangentNormal[1]=-tangentNormal[1];
+    Normal=color(tangentNormal[0]*0.5+0.5,tangentNormal[1]*0.5+0.5,tangentNormal[2]*0.5+0.5);
+}
