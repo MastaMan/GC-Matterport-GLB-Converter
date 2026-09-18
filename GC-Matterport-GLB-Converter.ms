@@ -2139,7 +2139,12 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 		return (skippedReasons.count == 0)
 	)
 
-	on btnCreateLayers pressed do createLODLayers()
+	on btnCreateLayers pressed do (
+		if (createLODLayers()) do (
+			_rBoilerplateGCMatterportGLBConverter.open = false
+			_rExportGCMatterportGLBConverter.open = true
+		)
+	)
 )
 
 rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (	
