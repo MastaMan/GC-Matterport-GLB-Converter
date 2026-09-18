@@ -2293,7 +2293,8 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 		return true
 	)
 
-	fn assignDefaultMaterials lodEntries = (
+	fn assignDefaultMaterials lodEntries materialCount: 6 = (
+        if (classOf materialCount != Integer or materialCount < 1 or materialCount > 1000) do throw "Material ID count must be an integer from 1 to 1000."
 		if (lodEntries.count == 0) do (
 			messageBox "Select one or more LOD layers in the list." title: "Assign Default Materials" beep: false
 			return false
@@ -2330,10 +2331,10 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 						try (
 							if ((getLODBaseName lodEntry.layerName) == undefined) do throw "Expected a layer named GC-<name>_LOD0 through GC-<name>_LOD3."
 							local lodSuffix = substring lodEntry.layerName (lodEntry.layerName.count - 3) 4
-							local subMaterialNames = for slotIndex in 1 to 6 collect ("ID" + (slotIndex as string) + "_" + lodSuffix)
+							local subMaterialNames = for slotIndex in 1 to materialCount collect ("ID" + (slotIndex as string) + "_" + lodSuffix)
 							local subMaterials = for subMaterialName in subMaterialNames collect (glTFMaterial name: subMaterialName)
-							local lodMaterial = MultiMaterial numsubs: 6 name: lodEntry.layerName
-							lodMaterial.materialIDList = #(1, 2, 3, 4, 5, 6)
+							local lodMaterial = MultiMaterial numsubs: materialCount name: lodEntry.layerName
+							lodMaterial.materialIDList = for materialID in 1 to materialCount collect materialID
 							lodMaterial.materialList = subMaterials
 							lodMaterial.names = subMaterialNames
 							targetNode.material = lodMaterial
@@ -2370,7 +2371,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		
 		button btnRefresList "Refresh List" width: 150 across: 2
 		button btnAddToLOD "Add to LOD" width: 150
-		button btnAssignDefaultMaterials "Assign Default Materials" width: 310 align: #center
+		button btnAssignDefaultMaterials "Assign Default Materials" width: 232 align: #left across: 2
+        spinner spnDefaultMaterialCount "IDs cnt.: " range: [1,256,6] offset: [0, 2] type: #integer fieldWidth: 42 width: 86 align: #right toolTip: "Number of glTF material IDs to create (1-1000)."
 	)
 	
 	group "Materials" (
@@ -2619,7 +2621,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local previousTimerActive = tmrLODRefresh.active
 		local originalLODSelection = lbxLODs.selection
 		local originalMaterialSelection = lbxMaterials.selection
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isRenderingAO = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -2682,7 +2684,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local reportLines = #()
 		local previousTimerActive = tmrLODRefresh.active
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isExportingLODs = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -3073,7 +3075,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			)
 			append selectedEntries lodEntries[rowIndex]
 		)
-		return _rBoilerplateGCMatterportGLBConverter.assignDefaultMaterials selectedEntries
+		return _rBoilerplateGCMatterportGLBConverter.assignDefaultMaterials selectedEntries materialCount: spnDefaultMaterialCount.value
 	)
 
 	on btnAssignDefaultMaterials pressed do assignSelectedLODMaterials()
@@ -3457,7 +3459,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	label lblDummy2 ""
 	
 	label lblAuthor ""
-	hyperlink lblCopy ""  align: #center
+	hyperlink lblCopy "" address: "https://3dground.net" align: #center
 	
 	label lblDummy3 ""
 	button btnUpdateViewer "Download / Update Model Viewer" width:270 height:26
@@ -3582,12 +3584,27 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 		edtDescription.BorderStyle = (dotNetClass "System.Windows.Forms.BorderStyle").FixedSingle
 		
 		
-        local i = getScriptInfo (getThisScriptFilename())
+        local infoFilePath = (dotNetClass "System.IO.Path").GetFullPath (GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms")
+        local i = getScriptInfo infoFilePath
 		
         lblName.caption = i.name
         lblAuthor.caption = i.author
         lblVer.caption = i.version
-        lblCopy.address = lblCopy.caption = i.developer
+        -- A hyperlink requires a web URI, never an empty value or a local file path.
+        local developerAddress = trimLeft (trimRight i.developer " \t\r\n") " \t\r\n"
+        local isWebAddress = (dotNetClass "System.Uri").IsWellFormedUriString developerAddress (dotNetClass "System.UriKind").Absolute
+        if isWebAddress do (
+            local developerURI = dotNetObject "System.Uri" developerAddress (dotNetClass "System.UriKind").Absolute
+            isWebAddress = ((findItem #("http", "https") (developerURI.Scheme as string)) > 0)
+        )
+        lblCopy.enabled = isWebAddress
+        if isWebAddress then (
+            lblCopy.address = developerAddress
+            lblCopy.caption = developerAddress
+        ) else (
+            lblCopy.caption = "Developer link unavailable"
+            format "About: INFO/DEV must be an absolute HTTP(S) URL in %.\n" infoFilePath
+        )
         lblClient.caption = i.client
 		edtDescription.text = i.description
 		
