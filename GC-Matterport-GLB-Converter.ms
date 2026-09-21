@@ -107,7 +107,6 @@ struct GCMatterportAOOptions (
 )
 
 global GCMatterportRuntimeFolder = getFilenamePath (getThisScriptFileName())
-fileIn (GCMatterportRuntimeFolder + "GC-Height-to-Normal.ms")
 
 global GCMatterportSceneProperties = GCMatterportScenePropertyStore()
 
@@ -652,15 +651,10 @@ fn GCMatterportSaveAOOptions materialEntry aoOptions = (
 )
 
 -- Shared map validation: no render/bake during UI refresh.
-fn GCMatterportMapIssue textureMap slotPath allowHeightNormal: false visited: #() = (
+fn GCMatterportMapIssue textureMap slotPath visited: #() = (
 	if textureMap == undefined do return undefined
 	if (findItem visited textureMap) != 0 do return (slotPath + ": cyclic texture graph")
 	append visited textureMap
-	if (classOf textureMap == GCMatterportHeightNormal and allowHeightNormal) then (
-		local inputIssue = GCMatterportHeightBitmapIssue textureMap.HeightBitmap
-		if inputIssue != undefined do return (slotPath + ": " + inputIssue)
-		return undefined
-	)
 	if (classOf textureMap != Bitmaptexture) do return ((classOf textureMap as string) + " in " + slotPath + "; use Bitmap")
 	for mapIndex in 1 to getNumSubTexmaps textureMap do (
 		local mapIssue = GCMatterportMapIssue (getSubTexmap textureMap mapIndex) (slotPath + "/" + getSubTexmapSlotName textureMap mapIndex) visited: visited
@@ -669,26 +663,22 @@ fn GCMatterportMapIssue textureMap slotPath allowHeightNormal: false visited: #(
 	return undefined
 )
 
-fn GCMatterportMaterialIssue materialRef allowHeightNormal: true = (
+fn GCMatterportMaterialIssue materialRef = (
 	if (materialRef == undefined) do return "missing glTF material"
 	if (classOf materialRef != glTFMaterial) do return ("material is " + (classOf materialRef as string) + ", not glTF")
 	for mapIndex in 1 to getNumSubTexmaps materialRef do (
 		local textureMap = getSubTexmap materialRef mapIndex
-		local isNormalSlot = false
-		-- Compare slot indices as well as map references: a shared map in Base Color is still invalid.
 		local slotCaption = getSubTexmapSlotName materialRef mapIndex
-		local slotToken = toLower (substituteString (substituteString slotCaption " " "") "_" "")
-		isNormalSlot = (matchPattern slotToken pattern: "*normal*" and not matchPattern slotToken pattern: "*bump*")
-		local mapIssue = GCMatterportMapIssue textureMap slotCaption allowHeightNormal: (allowHeightNormal and isNormalSlot)
+		local mapIssue = GCMatterportMapIssue textureMap slotCaption
 		if mapIssue != undefined do return mapIssue
 	)
 	return undefined
 )
 
-fn GCMatterportAssertExportMaps exportMaterial objectCaption allowHeightNormal: false = (
+fn GCMatterportAssertExportMaps exportMaterial objectCaption = (
 	if (classOf exportMaterial != MultiMaterial) do throw (objectCaption + ": Multi/Sub-Object required.")
 	for slotIndex in 1 to exportMaterial.materialList.count do (
-		local materialIssue = GCMatterportMaterialIssue exportMaterial.materialList[slotIndex] allowHeightNormal: allowHeightNormal
+		local materialIssue = GCMatterportMaterialIssue exportMaterial.materialList[slotIndex]
 		if materialIssue != undefined do throw (objectCaption + " / ID " + (exportMaterial.materialIDList[slotIndex] as string) + ": " + materialIssue)
 	)
 	return true
@@ -1117,11 +1107,7 @@ fn GCMatterportExportPreflight layerNames = (
 				)
 				if (validSlots) do (
 					exportMaterial = GCMatterportBuildExportMaterial sceneNode
-					try (GCMatterportAssertExportMaps parentMaterial entryCaption allowHeightNormal: true) catch (append issues (getCurrentException() as string))
-					for normalMap in (getClassInstances GCMatterportHeightNormal target: exportMaterial) do (
-						local normalIssue = GCMatterportHeightBitmapIssue normalMap.HeightBitmap
-						if (normalIssue != undefined) do append issues (entryCaption + ": " + normalIssue)
-					)
+					try (GCMatterportAssertExportMaps parentMaterial entryCaption) catch (append issues (getCurrentException() as string))
 					-- Excluded AO maps are already absent, so missing excluded AO files do not block export.
 					for bitmapMap in (getClassInstances Bitmaptexture target: exportMaterial) do (
 						local texturePath = mapPaths.getFullFilePath bitmapMap.filename
@@ -1189,7 +1175,6 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			-- All bitmap filenames point to owned copies before the native exporter is called.
 			local mapsFolder = stagingFolder + "maps\\"
 			makeDir mapsFolder all: true
-			GCMatterportBakeMaterialNormals temporaryNode.material mapsFolder exportJob.textureLimit
 			GCMatterportAssertExportMaps temporaryNode.material exportJob.nodeRef.name
 			local bitmapMaps = getClassInstances Bitmaptexture target: temporaryNode.material
 			for mapIndex in 1 to bitmapMaps.count do (
@@ -3355,7 +3340,6 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on btnRefresList pressed do (GCMatterportGeometrySummaryCache = #(); refreshLODs())
 	on tmrLODRefresh tick do (
 		try (
-			GCMatterportSyncHeightNormalMaps()
 			if (not syncSceneSelection()) do refreshLODs()
 		) catch (
 			tmrLODRefresh.active = false
@@ -3485,7 +3469,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
 			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
 			if (hasNewVersion) do (
-				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Height-to-Normal.ms", "GC-Height-to-Normal.osl", "GC-Matterport-GLB-Converter.ms")
+				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Matterport-GLB-Converter.ms")
 				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
 				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
 				for fileName in updateFiles do (
