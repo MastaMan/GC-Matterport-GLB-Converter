@@ -14,6 +14,19 @@ Script for proper conversion model to GLB=
 [1.0.0]
 * Initial release =
 
+[FILES]
+denoise.bat=
+vdenoise.xml=
+jpegoptim.exe=
+gltfpack.exe=
+gltfpack_webgl.bat=
+model-viewer.zip=
+playcanvas-viewer.zip=
+GC-Preview-Server.exe=
+GC-Preview-Server.cs=
+GC-Preview-Screenshot.js=
+GC-Matterport-GLB-Converter.ms=
+
 [SCRIPT]
 */
 
@@ -151,7 +164,7 @@ fn GCMatterportGetEffectiveAOOptions materialEntry = (
 	if (classOf aoOptions.useCoronaAO != BooleanClass or classOf aoOptions.useVRayDenoiser != BooleanClass or classOf aoOptions.customResolution != BooleanClass) do return undefined
 	if (classOf aoOptions.passes != Integer or aoOptions.passes < 1 or aoOptions.passes > 9999) do return undefined
 	if ((classOf aoOptions.sizeCM != Float and classOf aoOptions.sizeCM != Integer) or not (aoOptions.sizeCM >= 0.01 and aoOptions.sizeCM <= 9999.0)) do return undefined
-	if ((findItem #(512, 1024, 2048, 4096) aoOptions.manualResolution) == 0) do return undefined
+	if ((findItem #(128, 256, 512, 1024, 2048, 4096) aoOptions.manualResolution) == 0) do return undefined
 	aoOptions.resolution = if aoOptions.customResolution then aoOptions.manualResolution else (GCMatterportAutomaticAOResolution materialEntry.layerName)
 	if (aoOptions.resolution == undefined) do return undefined
 	aoOptions.sizeWorldUnits = aoOptions.sizeCM * (units.decodeValue "1cm")
@@ -977,6 +990,8 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem passes150 "150"
 	)
 	submenu "Override Resolution" (
+		menuItem resolution128 "128"
+		menuItem resolution256 "256"
 		menuItem resolution512 "512"
 		menuItem resolution1024 "1024"
 		menuItem resolution2048 "2048"
@@ -1010,6 +1025,8 @@ rcmenu GCMatterportMaterialContextMenu (
 	on passes60 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 60
 	on passes100 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 100
 	on passes150 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 150
+	on resolution128 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 128
+	on resolution256 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 256
 	on resolution512 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 512
 	on resolution1024 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 1024
 	on resolution2048 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 2048
@@ -1242,6 +1259,7 @@ global GCMatterportPCPreviewRoot
 global GCMatterportPCPreviewToken
 global GCMatterportLiveSession
 global GCMatterportLiveStop
+global GCMatterportLiveJSONQuote
 global GCMatterportPreviewServerReady
 global GCMatterportPreviewStartBusy = false
 global GCMatterportPreviewLastProbeError = ""
@@ -1251,8 +1269,9 @@ global GCMatterportPreviewLastProbeError = ""
 fn GCMatterportStopAllPreviewServers = (
 	local pathClass = dotNetClass "System.IO.Path"
 	local ownedExecutables = for relativeFolder in #("model-viewer\\", "playcanvas-viewer\\") collect (toLower (pathClass.GetFullPath (GCMatterportRuntimeFolder + relativeFolder + "localhost.exe")))
+	append ownedExecutables (toLower (pathClass.GetFullPath (GCMatterportRuntimeFolder + "GC-Preview-Server.exe")))
 	local failureReason = undefined
-	for serverProcess in ((dotNetClass "System.Diagnostics.Process").GetProcessesByName "localhost") do (
+	for processName in #("localhost", "GC-Preview-Server") do for serverProcess in ((dotNetClass "System.Diagnostics.Process").GetProcessesByName processName) do (
 		local executablePath = undefined
 		try (
 			if (not serverProcess.HasExited) do executablePath = toLower (pathClass.GetFullPath (serverProcess.MainModule.FileName as string))
@@ -1278,19 +1297,24 @@ fn GCMatterportStopAllPreviewServers = (
 	return true
 )
 
-fn GCMatterportStartPreviewServer viewerFolder = (
+fn GCMatterportStartPreviewServer viewerFolder modelName = (
 	if GCMatterportPreviewStartBusy do throw "A Model Viewer server is already starting."
 	GCMatterportPreviewStartBusy = true
 	local startedServer = undefined
 	local resultData = undefined
 	local failureReason = undefined
 	try (
-		local serverExecutable = viewerFolder + "localhost.exe"
+		local serverExecutable = GCMatterportRuntimeFolder + "GC-Preview-Server.exe"
 		if (not doesFileExist serverExecutable) do throw ("Missing Model Viewer server: " + serverExecutable)
-		-- The bundled server exits immediately when another instance owns its folder.
+		if (not doesFileExist (GCMatterportRuntimeFolder + "GC-Preview-Screenshot.js")) do throw "Missing Preview screenshot helper. Update the converter package."
+		-- Replace the previous converter preview, including legacy localhost processes.
 		GCMatterportStopAllPreviewServers()
 		local readyToken = ((dotNetClass "System.Guid").NewGuid()).ToString "N"
-		(dotNetClass "System.IO.File").WriteAllText (viewerFolder + "viewer-ready.txt") readyToken
+		local sceneDirectory = if maxFileName == "" then "" else maxFilePath
+        local viewerName = if (findString viewerFolder "playcanvas-viewer") != undefined then "PlayCanvas" else "Google"
+        local contextText = "{\"sceneDirectory\":" + (GCMatterportLiveJSONQuote sceneDirectory) + ",\"modelName\":" + (GCMatterportLiveJSONQuote modelName) + ",\"viewerName\":" + (GCMatterportLiveJSONQuote viewerName) + ",\"token\":" + (GCMatterportLiveJSONQuote readyToken) + "}"
+        local contextFile = viewerFolder + ".gc-preview-context.json"
+        (dotNetClass "System.IO.File").WriteAllText contextFile contextText
 		local attemptReport = ""
 		for attemptIndex in 1 to 3 while (resultData == undefined) do (
 			local listener = dotNetObject "System.Net.Sockets.TcpListener" (dotNetClass "System.Net.IPAddress").Loopback 0
@@ -1299,7 +1323,7 @@ fn GCMatterportStartPreviewServer viewerFolder = (
 			listener.Stop()
 			local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
 			startInfo.FileName = serverExecutable
-			startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " 127.0.0.1"
+			startInfo.Arguments = "\"" + (trimRight viewerFolder "\\/") + "\" " + (portNumber as string) + " \"" + contextFile + "\""
 			startInfo.WorkingDirectory = viewerFolder
 			startInfo.UseShellExecute = false
 			startInfo.CreateNoWindow = true
@@ -1375,8 +1399,8 @@ fn GCMatterportPreviewServerReady portNumber expectedToken = (
 	return isReady
 )
 
-fn GCMatterportEnsurePreviewServer viewerFolder = (
-	local serverData = GCMatterportStartPreviewServer viewerFolder
+fn GCMatterportEnsurePreviewServer viewerFolder modelName = (
+	local serverData = GCMatterportStartPreviewServer viewerFolder modelName
 	GCMatterportPreviewProcess = serverData[1]
 	GCMatterportPreviewPort = serverData[2]
 	GCMatterportPreviewToken = serverData[3]
@@ -1420,6 +1444,31 @@ fn GCMatterportDownloadFile sourceURL destination = (
 	return true
 )
 
+fn GCMatterportUpdateManifest scriptPath = (
+	local manifestKeys = getINISetting scriptPath "FILES"
+	if (manifestKeys.count == 0) do throw "The script update manifest [FILES] is empty."
+	local scriptFileName = filenameFromPath scriptPath
+	local updateFiles = #()
+	local seenNames = #()
+	local hasScript = false
+	for fileKey in manifestKeys do (
+		local fileName = trimLeft (trimRight fileKey " 	\r\n") " 	\r\n"
+		if (fileName == "" or fileName == "." or fileName == "..") do throw "The update manifest contains an invalid filename."
+		for invalidPart in #("\\", "/", ":", "*", "?", "\"", "<", ">", "|") do (
+			if (findString fileName invalidPart != undefined) do throw ("Only filenames beside the script are allowed in [FILES]: " + fileName)
+		)
+		local lowerName = toLower fileName
+		if (findItem seenNames lowerName == 0) do (
+			append seenNames lowerName
+			if (lowerName == toLower scriptFileName) then hasScript = true
+			else append updateFiles fileName
+		)
+	)
+	if (not hasScript) do throw ("The update manifest must include " + scriptFileName + "=.")
+	-- Replace the entry script last, after all listed dependencies.
+	append updateFiles scriptFileName
+	return updateFiles
+)
 fn GCMatterportPrepareViewer stageRoot = (
 	local engineText = (dotNetClass "System.IO.File").ReadAllText (stageRoot + "\\js\\engine.js")
 	local decoderMatch = (dotNetClass "System.Text.RegularExpressions.Regex").Match engineText "https://www[.]gstatic[.]com/basis-universal/versioned/[A-Za-z0-9_-]+/"
@@ -1536,10 +1585,10 @@ fn GCMatterportPreviewLOD layerName = (
 		) else (
 			(dotNetClass "System.IO.File").Move stagedFile destinationFile
 		)
-		local portNumber = GCMatterportEnsurePreviewServer viewerFolder
+		local portNumber = GCMatterportEnsurePreviewServer viewerFolder layerName
 		local titleValue = (dotNetClass "System.Uri").EscapeDataString layerName
 		local cacheVersion = ((dotNetClass "System.DateTime").UtcNow.Ticks as string)
-		local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?model=" + modelKey + "&title=" + titleValue + "&v=" + cacheVersion
+		local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?captureToken=" + GCMatterportPreviewToken + "&model=" + modelKey + "&title=" + titleValue + "&v=" + cacheVersion
 		ShellLaunch previewURL ""
 	) catch (
 		previewFailure = getCurrentException() as string
@@ -1585,8 +1634,8 @@ fn GCMatterportPCPreviewServerReady portNumber expectedToken = (
 	return isReady
 )
 
-fn GCMatterportEnsurePCPreviewServer viewerFolder = (
-	local serverData = GCMatterportStartPreviewServer viewerFolder
+fn GCMatterportEnsurePCPreviewServer viewerFolder modelName = (
+	local serverData = GCMatterportStartPreviewServer viewerFolder modelName
 	GCMatterportPCPreviewProcess = serverData[1]
 	GCMatterportPCPreviewPort = serverData[2]
 	GCMatterportPCPreviewToken = serverData[3]
@@ -1668,10 +1717,10 @@ fn GCMatterportPreviewPCLOD layerName openBrowser: true = (
 		) else (
 			(dotNetClass "System.IO.File").Move stagedFile destinationFile
 		)
-		local portNumber = GCMatterportEnsurePCPreviewServer viewerFolder
+		local portNumber = GCMatterportEnsurePCPreviewServer viewerFolder layerName
 		local titleValue = (dotNetClass "System.Uri").EscapeDataString layerName
 		local cacheVersion = ((dotNetClass "System.DateTime").UtcNow.Ticks as string)
-		previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?default&load=" + ((dotNetClass "System.Uri").EscapeDataString ("models/" + modelKey + ".glb?v=" + cacheVersion)) + "&title=" + titleValue
+		previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?captureToken=" + GCMatterportPCPreviewToken + "&default&load=" + ((dotNetClass "System.Uri").EscapeDataString ("models/" + modelKey + ".glb?v=" + cacheVersion)) + "&title=" + titleValue
 		if (openBrowser) do ShellLaunch previewURL ""
 	) catch (
 		previewFailure = getCurrentException() as string
@@ -1846,7 +1895,10 @@ fn GCMatterportLiveExportGeometry sessionData entries outputFolder = (
   select (for originalNode in originalSelection where isValidNode originalNode collect originalNode)
   setCommandPanelTaskMode mode: originalPanel
   if (originalPanel == #modify and originalStack != undefined) do modPanel.setCurrentObject originalStack
-  subObjectLevel = originalLevel
+  if (originalPanel == #modify) do (
+   if (originalLevel != undefined) then subObjectLevel = originalLevel
+   else if (subObjectLevel != undefined) do subObjectLevel = 0
+  )
  )
  if failureReason != undefined do throw failureReason
  return gltfPath
@@ -2144,8 +2196,8 @@ fn GCMatterportLiveOpen layerName openBrowser: true = (
  when topology sourceNode changes id: #GCMatterportLiveGeometry do (GCMatterportLiveGeometryDirty = true)
  when transform sourceNode changes id: #GCMatterportLiveGeometry do (GCMatterportLiveGeometryDirty = true)
  try (GCMatterportLiveRollout.tmrLive.active = true) catch()
- local portNumber = GCMatterportEnsurePreviewServer viewerFolder
- local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?live=" + token + "&title=" + ((dotNetClass "System.Uri").EscapeDataString layerName)
+ local portNumber = GCMatterportEnsurePreviewServer viewerFolder layerName
+ local previewURL = "http://127.0.0.1:" + (portNumber as string) + "/?captureToken=" + GCMatterportPreviewToken + "&live=" + token + "&title=" + ((dotNetClass "System.Uri").EscapeDataString layerName)
  if openBrowser do ShellLaunch previewURL ""
  return previewURL
 )
@@ -2356,7 +2408,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		
 		button btnRefresList "Refresh List" width: 150 across: 2
 		button btnAddToLOD "Add to LOD" width: 150
-		button btnAssignDefaultMaterials "Assign Default Materials" width: 232 align: #left across: 2
+		button btnAssignDefaultMaterials "Assign Default Materials" width: 200 offset: [6, 0] align: #left across: 2
         spinner spnDefaultMaterialCount "IDs cnt.: " range: [1,256,6] offset: [0, 2] type: #integer fieldWidth: 42 width: 86 align: #right toolTip: "Number of glTF material IDs to create (1-1000)."
 	)
 	
@@ -2369,7 +2421,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		checkbox cbxUseCoronaAO "Use Corona AO" width: 115 align: #left across: 2 checked: true enabled: false
 		label lblAOSelection "Select one material." align: #right width: 188
 		checkbox cbxAOOverride "Override Resolution" width: 125 enabled: false across: 3 align: #left
-		dropdownlist ddlAOResolution "" items: #("512", "1024", "2048", "4096") selection: 2 width: 64 enabled: false align: #left
+		dropdownlist ddlAOResolution "" items: #("128", "256", "512", "1024", "2048", "4096") selection: 4 width: 64 enabled: false align: #left
 		label lblDefaultAOResolution "" width: 104 align: #left visible: false
 		spinner spnAOPasses "Passes: " range: [1, 9999, 15] type: #integer fieldWidth: 42 width: 84 align: #left across: 3 enabled: false
 		spinner spnAOSize "Size (cm): " range: [0.01, 9999.0, 5.0] type: #float fieldWidth: 46 width: 99 align: #left enabled: false
@@ -2452,13 +2504,13 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			lblDefaultAOResolution.text = "Default: " + (if defaultResolution == undefined then "N/A" else defaultResolution as string)
 			lblDefaultAOResolution.visible = cbxAOOverride.checked
 			cbxAODenoise.checked = aoOptions.useVRayDenoiser
-			ddlAOResolution.selection = findItem #(512, 1024, 2048, 4096) aoOptions.resolution
+			ddlAOResolution.selection = findItem #(128, 256, 512, 1024, 2048, 4096) aoOptions.resolution
 		) else (
 			lblAOSelection.text = if (materialEntry == undefined) then "Select one material." else "AO settings unavailable."
 			lblAOSelection.toolTip = if (materialEntry == undefined) then "Select exactly one material to edit its AO settings." else "AO settings invalid or LOD suffix unsupported."
 			spnAOPasses.value = 15
 			spnAOSize.value = 5.0
-			ddlAOResolution.selection = 2
+			ddlAOResolution.selection = 4
 			cbxUseCoronaAO.checked = true
 			cbxAOOverride.checked = false
 			lblDefaultAOResolution.visible = false
@@ -2483,7 +2535,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		aoOptions.useVRayDenoiser = cbxAODenoise.checked
 		aoOptions.customResolution = cbxAOOverride.checked
 		-- Keep the manual value while automatic resolution is displayed.
-		if (changedField == #resolution and aoOptions.customResolution and ddlAOResolution.selection > 0) do aoOptions.manualResolution = #(512, 1024, 2048, 4096)[ddlAOResolution.selection]
+		if (changedField == #resolution and aoOptions.customResolution and ddlAOResolution.selection > 0) do aoOptions.manualResolution = #(128, 256, 512, 1024, 2048, 4096)[ddlAOResolution.selection]
 		local didSave = GCMatterportSaveAOOptions materialEntry aoOptions
 		aoDisplaySignature = undefined
 		refreshMaterials()
@@ -3455,6 +3507,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 		-- Keep the existing project endpoint; an unavailable/private repository fails without replacing files.
 		local url = "https://raw.githubusercontent.com/MastaArt/GC-Matterport-GLB-Converter/main/"
 		local currentScript = GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms"
+		local updateFiles = #()
 		local stage = GCMatterportRuntimeFolder + "._update_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
 		local replacedFiles = #()
 		local updateFailure = undefined
@@ -3462,6 +3515,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 		local rollbackFailed = false
 		try (
 			makeDir stage all:true
+			updateFiles = GCMatterportUpdateManifest currentScript
 			local downloadedScript = stage + "GC-Matterport-GLB-Converter.ms"
 			GCMatterportDownloadFile (url + "GC-Matterport-GLB-Converter.ms") downloadedScript
 			if ((getIniSetting downloadedScript "INFO" "NAME") != (getIniSetting currentScript "INFO" "NAME")) do throw "The update belongs to a different script."
@@ -3469,7 +3523,8 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
 			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
 			if (hasNewVersion) do (
-				local updateFiles = #("denoise.bat", "vdenoise.xml", "jpegoptim.exe", "gltfpack.exe", "gltfpack_webgl.bat", "model-viewer.zip", "playcanvas-viewer.zip", "GC-Matterport-GLB-Converter.ms")
+				-- A newer release may add dependencies absent from the installed script.
+				if ((getINISetting downloadedScript "FILES").count > 0) do updateFiles = GCMatterportUpdateManifest downloadedScript
 				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
 				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
 				for fileName in updateFiles do (
@@ -3531,7 +3586,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
         
 		struct data (version, author, name, description, developer, client, help, releases)
 		
-        local r = for i in (getINISetting s) where (i != "ABOUT" and i != "SCRIPT" and i != "COPY") collect i
+        local r = for i in (getINISetting s) where (i != "ABOUT" and i != "SCRIPT" and i != "COPY" and i != "FILES") collect i
 		
 		return (data version: v author: a name: n description: o developer: d client: c help: h releases: r)
     )
