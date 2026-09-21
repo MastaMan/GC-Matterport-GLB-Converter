@@ -63,14 +63,22 @@ new dependencies.
   PlayCanvas includes only the Artist Workshop HDRI and the agreed defaults.
 - Preserve [INFO] NAME = GC Matterport GLB Converter: the updater checks identity.
   VERSION must increase for an existing installation to offer an update.
-- Check the actual download endpoints before claiming the updater is ready.
-  The converter currently uses the MastaArt/GC-Matterport-GLB-Converter raw GitHub
-  endpoint, while origin is https://github.com/MastaMan/GC-Matterport-GLB-Converter.git.
-  These are different locations; a push to origin alone does not prove the
-  updater can download the release. The converter endpoint previously returned
-  HTTP 404. Verify the script and every dependency, or resolve the hosting
-  mismatch explicitly; do not silently invent or replace the endpoint.
-  Google's separate viewer installer uses MastaArt/GC-Tools/main/model-viewer.zip.
+- Both the converter updater and Google's separate viewer updater use
+  https://raw.githubusercontent.com/MastaMan/GC-Matterport-GLB-Converter/main/,
+  matching origin. Verify every [FILES] entry at that endpoint before release.
+  The Google viewer button installs the project's patched archive, preserving
+  its local defaults and wheel zoom changes.
+- Updates download every listed file and validate both viewer archives before
+  stopping converter-owned preview servers. Existing files and both extracted
+  viewer folders remain backed up until the complete transaction succeeds.
+  A failure restores them; failed rollback retains recovery files in staging.
+- GC-Preview-Server.exe is precompiled with the .NET Framework 64-bit C# compiler,
+  referencing System.Drawing.dll and System.Web.Extensions.dll. It is not built
+  on client startup or update. The .cs source is included because [FILES] lists
+  it, but execution requires the .exe and GC-Preview-Screenshot.js.
+- Installations still using the old MastaArt endpoint cannot discover this fix
+  through that unavailable endpoint. Distribute this corrected package once;
+  later higher-version releases use the new manifest-based updater.
 
 4. Run release checks:
 

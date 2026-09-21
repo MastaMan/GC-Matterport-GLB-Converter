@@ -1529,29 +1529,29 @@ fn GCMatterportInstallViewerArchive archivePath prepareOriginal:false normalized
 )
 
 
+global GCMatterportPrepareUpdate
+global GCMatterportApplyUpdate
 fn GCMatterportUpdateViewer = (
-	local token = ((dotNetClass "System.Guid").NewGuid()).ToString("N")
-	local downloadedArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".download.zip"
-	local readyArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".ready.zip"
-	local backupArchive = GCMatterportRuntimeFolder + "._viewer_" + token + ".previous.zip"
-	local archivePath = GCMatterportRuntimeFolder + "model-viewer.zip"
-	local updateFailure = undefined
-	try (
-		GCMatterportDownloadFile "https://raw.githubusercontent.com/MastaMan/GC-Matterport-GLB-Converter/main/model-viewer.zip" downloadedArchive
-		GCMatterportInstallViewerArchive downloadedArchive normalizedArchive:readyArchive
-		if (doesFileExist archivePath) then (
-			(dotNetClass "System.IO.File").Replace readyArchive archivePath backupArchive
-		) else (
-			(dotNetClass "System.IO.File").Move readyArchive archivePath
-		)
-	) catch (updateFailure = getCurrentException() as string)
-	for temporaryFile in #(downloadedArchive, readyArchive, backupArchive) where (doesFileExist temporaryFile) do (
-		try (deleteFile temporaryFile) catch (format "Viewer archive cleanup: %\n" (getCurrentException()))
-	)
-	if (updateFailure != undefined) do throw updateFailure
-	return true
+    local stage = GCMatterportRuntimeFolder + "._update_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
+    local updateFailure = undefined
+    local rollbackFailed = false
+    try (
+        makeDir stage all: true
+        GCMatterportDownloadFile "https://raw.githubusercontent.com/MastaMan/GC-Matterport-GLB-Converter/main/model-viewer.zip" (stage + "model-viewer.zip")
+        local updateFiles = #("model-viewer.zip")
+        local preparedFolders = GCMatterportPrepareUpdate stage updateFiles
+        if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs or GCMatterportLiveBusy) do throw "A render, export or Live Preview update is active. Retry when it finishes."
+        if (GCMatterportLiveSession != undefined) do GCMatterportLiveStop()
+        GCMatterportStopAllPreviewServers()
+        local updateResult = GCMatterportApplyUpdate GCMatterportRuntimeFolder stage updateFiles preparedFolders
+        rollbackFailed = updateResult.rollbackFailed
+        if (not updateResult.success) do throw updateResult.errorMessage
+    ) catch (updateFailure = getCurrentException() as string)
+    if (not rollbackFailed and doesDirectoryExist stage) do try ((dotNetClass "System.IO.Directory").Delete stage true) catch (format "Viewer update cleanup: %\n" (getCurrentException()))
+    if (rollbackFailed) do format "Viewer rollback incomplete. Recovery files retained in %\n" stage
+    if (updateFailure != undefined) do throw updateFailure
+    return true
 )
-
 fn GCMatterportEnsureViewerInstalled = (
 	local viewerFolder = GCMatterportRuntimeFolder + "model-viewer\\"
 	if (GCMatterportViewerIsInstalled viewerFolder) do return true
