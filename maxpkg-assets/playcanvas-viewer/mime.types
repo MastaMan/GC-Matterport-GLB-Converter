@@ -1,0 +1,6 @@
+application/javascript js
+application/wasm wasm
+text/css css
+image/svg+xml svg
+model/gltf-binary glb
+image/vnd.radiance hdr

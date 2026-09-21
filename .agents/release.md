@@ -55,7 +55,9 @@ script must be listed and is replaced last. Older installed updaters that do
 not read [FILES] still require a one-time complete package update to acquire
 new dependencies.
 
-- Store both viewers as ZIP archives only. Do not commit extracted model-viewer/
+- Keep viewer ZIPs as the updater payload. Also commit the clean allowlisted copies in
+  maxpkg-assets/ for the official MaxPkg packager, which excludes ZIP inputs.
+  Do not commit extracted live model-viewer/
   or playcanvas-viewer/, staged models, generated GLB/AO files, logs, or temporary
   ._viewer_*, ._pcviewer_*, and ._update_* files. Preserve the .gitignore rules.
 - Check archive contents against GCMatterportViewerFiles and
@@ -124,8 +126,13 @@ Expected result:
 
 ## Notes
 
-- Do not add per-user/per-machine INI settings to git; *.ini is ignored.
+- Do not add per-user/per-machine INI settings to git; *.ini is ignored except
+  the required maxpkg-packager.ini and maxpkg-changelog.ini authoring files.
 - Keep local settings files with credentials out of credential scans and out of
   commits.
 - If `git push` prints a `credential-manager-core` warning but still updates
   `origin/main`, treat the push as successful and verify with `git status`.
+
+## Optional GitHub Release publication
+
+Source commit/push does not publish a GitHub Release. Run release-github.bat --check-only for a read-only package and remote check. Actual publication requires a separate explicit request; normal mode asks for Y, targets the pushed source commit and uploads the highest numerical version from dist. Keep dist/ ignored and retain the package GUID across versions.

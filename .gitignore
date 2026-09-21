@@ -6,3 +6,8 @@
 /._update_*/
 /playcanvas-viewer/
 /._pcviewer_*/
+
+# MaxPkg authoring settings; user INIs remain ignored.
+!/maxpkg-packager.ini
+!/maxpkg-changelog.ini
+/dist/

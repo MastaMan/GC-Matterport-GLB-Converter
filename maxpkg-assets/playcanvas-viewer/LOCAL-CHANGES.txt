@@ -1,0 +1,9 @@
+PlayCanvas Model Viewer 5.10.0
+Upstream: https://github.com/playcanvas/model-viewer
+Source revision: 2c3e5e5b5e744fccf8fd4e1bcdc26d4145e87417
+Runtime assets: https://playcanvas.com/viewer/
+Local adaptation: original full viewer UI; Artist Workshop is the only bundled environment; screenshot defaults; local URLs and no platform analytics.
+Background color approximated from screenshot as RGB 192,192,192. Viewport follows browser size.
+TinyWeb localhost.exe is reused from the existing GC Tools Model Viewer distribution.
+
+Mouse wheel zoom: native CameraControls.wheelSpeed reduced from 0.06 to 0.02; pinch and orbit unchanged.

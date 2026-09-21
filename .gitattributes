@@ -1,0 +1,6 @@
+# Preserve vendored runtime assets byte-for-byte, including Radiance HDR data.
+maxpkg-assets/** -text -diff
+# Keep the official MaxPkg sources identical to their reviewed upstream revision.
+maxpkg-packager.ms -text
+_install.ms -text
+_uninstall.ms -text

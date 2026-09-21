@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Google Model Viewer</title><link rel="icon" href="/favicon-16x16.png">
+<style>html,body{padding:0;margin:0;background:#f7f7f7}model-viewer{width:100vw;height:100vh}#error{position:fixed;top:16px;left:16px;right:16px;padding:12px;background:white;color:#900;font:14px sans-serif}</style>
+</head><body>
+<model-viewer alt="" shadow-intensity="1" camera-controls environment-image="hdri/studio.hdr" camera-orbit="-36deg 72deg" field-of-view="30deg" exposure="0.4" tone-mapping="aces" min-field-of-view="50deg" max-field-of-view="50deg" touch-action="pan-y"></model-viewer>
+<div id="error" hidden></div>
+<script type="module">
+const errorBox=document.querySelector('#error');
+const reportError=message=>{errorBox.textContent=message;errorBox.hidden=false;};
+try {
+ const response=await fetch('/js/engine.js');
+ if(!response.ok) throw new Error('Cannot load Model Viewer engine: '+response.status);
+ const engineURL=URL.createObjectURL(new Blob([await response.text()],{type:'application/javascript'}));
+ try {await import(engineURL);} finally {URL.revokeObjectURL(engineURL);}
+ customElements.get('model-viewer').ktx2TranscoderLocation='/js/basis/';
+ const parameters=new URLSearchParams(location.search), model=parameters.get('model'), live=parameters.get('live');
+ const viewer=document.querySelector('model-viewer');
+ document.title=(parameters.get('title')||'Model Viewer')+' - Google Model Viewer';
+ viewer.alt=document.title;window.devicePixelRatio=2;
+ viewer.addEventListener('error',()=>reportError('The exported GLB could not be loaded.'));
+ if(live && /^[a-f0-9]{32}$/.test(live)) {viewer.minCameraOrbit='auto auto 1%';viewer.src='/live/'+live+'/geometry/scene.glb';}
+ else if(model && /^[a-f0-9]{64}$/.test(model)) viewer.src='/models/'+model+'.glb?v='+encodeURIComponent(parameters.get('v')||'');
+ else throw new Error('A valid exported LOD or Live Preview session is required.');
+} catch(error) {reportError(error.message||'Model Viewer could not start.');}
+</script><script src="/js/live-sync.js"></script>
+</body></html>
