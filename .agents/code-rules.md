@@ -278,3 +278,10 @@ When using these rules with Codex, Claude Code, or another coding agent:
 - Require it to report tests that were actually run.
 - Do not let it silently substitute guessed metadata, legal information, URLs, or compatibility claims.
 - Do not let it commit or push unless you explicitly request that action.
+
+## Runtime Test Isolation
+
+- Never replace installed converter globals with fixture functions in the user's running 3ds Max session.
+- A surrounding parentheses block does not guarantee isolation: explicitly declare every fixture function identifier `local` before its `fn` definition, including names already present as globals.
+- Prefer a separate Max process for tests requiring mocks. If a test must run in the active process, save the original global function references and assert that their identities and runtime state are unchanged after the test, including its failure path.
+- If intentional global replacement is unavoidable, restore every saved reference in a guaranteed cleanup path before reporting any result or rethrowing the test error. Never leave a throwing fixture stub installed.
