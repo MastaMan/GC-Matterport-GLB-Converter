@@ -1537,8 +1537,8 @@ fn GCMatterportUpdateViewer = (
 	local archivePath = GCMatterportRuntimeFolder + "model-viewer.zip"
 	local updateFailure = undefined
 	try (
-		GCMatterportDownloadFile "https://raw.githubusercontent.com/MastaArt/GC-Tools/main/model-viewer.zip" downloadedArchive
-		GCMatterportInstallViewerArchive downloadedArchive prepareOriginal:true normalizedArchive:readyArchive
+		GCMatterportDownloadFile "https://raw.githubusercontent.com/MastaMan/GC-Matterport-GLB-Converter/main/model-viewer.zip" downloadedArchive
+		GCMatterportInstallViewerArchive downloadedArchive normalizedArchive:readyArchive
 		if (doesFileExist archivePath) then (
 			(dotNetClass "System.IO.File").Replace readyArchive archivePath backupArchive
 		) else (
@@ -3481,6 +3481,83 @@ rollout _rTransformationGCMatterportGLBConverter "Transformation" category: 3 (
 	on btnMoveToCenter pressed do transformSelectedObjects #move
 )
 
+struct GCMatterportUpdateResultData (success = false, errorMessage, rollbackFailed = false)
+
+fn GCMatterportPrepareUpdate stage updateFiles = (
+    for fileName in updateFiles do (
+        local fileInfo = dotNetObject "System.IO.FileInfo" (stage + fileName)
+        if (not fileInfo.Exists or fileInfo.Length == 0) do throw ("Update file is missing or empty: " + fileName)
+    )
+    dotNet.loadAssembly "System.IO.Compression.FileSystem"
+    local preparedFolders = #()
+    local viewerPackages = #(#("model-viewer.zip", "model-viewer", GCMatterportViewerFiles()), #("playcanvas-viewer.zip", "playcanvas-viewer", GCMatterportPCViewerFiles()))
+    for packageEntry in viewerPackages where ((findItem updateFiles packageEntry[1]) > 0) do (
+        local archive = (dotNetClass "System.IO.Compression.ZipFile").OpenRead (stage + packageEntry[1])
+        try (
+            for relativeFile in packageEntry[3] do (
+                local archiveEntry = archive.GetEntry (substituteString relativeFile "\\" "/")
+                if (archiveEntry == undefined or archiveEntry.Length == 0) do throw (packageEntry[1] + " is missing: " + relativeFile)
+                local destination = stage + packageEntry[2] + "\\" + relativeFile
+                makeDir (getFilenamePath destination) all: true
+                (dotNetClass "System.IO.Compression.ZipFileExtensions").ExtractToFile archiveEntry destination false
+            )
+        ) catch (archive.Dispose(); throw())
+        archive.Dispose()
+        append preparedFolders packageEntry[2]
+    )
+    return preparedFolders
+)
+
+fn GCMatterportApplyUpdate runtimeFolder stage updateFiles preparedFolders = (
+    local updateResult = GCMatterportUpdateResultData()
+    local replacedFiles = #()
+    local replacedFolders = #()
+    local pathClass = dotNetClass "System.IO.Path"
+    local rootPath = trimRight (pathClass.GetFullPath runtimeFolder) "\\/"
+    local stagePath = trimRight (pathClass.GetFullPath stage) "\\/"
+    if ((toLower (pathClass.GetDirectoryName stagePath)) != (toLower rootPath) or not matchPattern (filenameFromPath stagePath) pattern: "._update_*") do throw "The update staging folder must belong to this installation."
+    try (
+        for folderName in preparedFolders do (
+            local destination = runtimeFolder + folderName
+            local hadPrevious = doesDirectoryExist destination
+            if (hadPrevious) do (dotNetClass "System.IO.Directory").Move destination (stage + folderName + ".previous")
+            local folderState = #(folderName, hadPrevious, false)
+            append replacedFolders folderState
+            (dotNetClass "System.IO.Directory").Move (stage + folderName) destination
+            folderState[3] = true
+        )
+        for fileName in updateFiles do (
+            local destination = runtimeFolder + fileName
+            local hadPrevious = doesFileExist destination
+            if (hadPrevious) then (
+                (dotNetClass "System.IO.File").Replace (stage + fileName) destination (stage + fileName + ".previous")
+            ) else (
+                (dotNetClass "System.IO.File").Move (stage + fileName) destination
+            )
+            append replacedFiles #(fileName, hadPrevious)
+        )
+        updateResult.success = true
+    ) catch (updateResult.errorMessage = getCurrentException() as string)
+    if (not updateResult.success) do (
+        for fileIndex in replacedFiles.count to 1 by -1 do (
+            local fileState = replacedFiles[fileIndex]
+            local destination = runtimeFolder + fileState[1]
+            try (
+                if (fileState[2]) then (dotNetClass "System.IO.File").Replace (stage + fileState[1] + ".previous") destination (stage + fileState[1] + ".failed")
+                else (dotNetClass "System.IO.File").Move destination (stage + fileState[1] + ".failed")
+            ) catch (updateResult.rollbackFailed = true; format "Update file rollback failed: %\n" (getCurrentException()))
+        )
+        for folderIndex in replacedFolders.count to 1 by -1 do (
+            local folderState = replacedFolders[folderIndex]
+            local destination = runtimeFolder + folderState[1]
+            try (
+                if (folderState[3]) do (dotNetClass "System.IO.Directory").Move destination (stage + folderState[1] + ".failed")
+                if (folderState[2]) do (dotNetClass "System.IO.Directory").Move (stage + folderState[1] + ".previous") destination
+            ) catch (updateResult.rollbackFailed = true; format "Update viewer rollback failed: %\n" (getCurrentException()))
+        )
+    )
+    return updateResult
+)
 rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	group "Description" (
 		dotNetControl edtDescription "System.Windows.Forms.Textbox" align:#center height: 60
@@ -3504,64 +3581,41 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	    
 
 	fn bgUpdate = (
-		-- Keep the existing project endpoint; an unavailable/private repository fails without replacing files.
-		local url = "https://raw.githubusercontent.com/MastaArt/GC-Matterport-GLB-Converter/main/"
-		local currentScript = GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms"
-		local updateFiles = #()
-		local stage = GCMatterportRuntimeFolder + "._update_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
-		local replacedFiles = #()
-		local updateFailure = undefined
-		local hasNewVersion = false
-		local rollbackFailed = false
-		try (
-			makeDir stage all:true
-			updateFiles = GCMatterportUpdateManifest currentScript
-			local downloadedScript = stage + "GC-Matterport-GLB-Converter.ms"
-			GCMatterportDownloadFile (url + "GC-Matterport-GLB-Converter.ms") downloadedScript
-			if ((getIniSetting downloadedScript "INFO" "NAME") != (getIniSetting currentScript "INFO" "NAME")) do throw "The update belongs to a different script."
-			local remoteVersion = dotNetObject "System.Version" (getIniSetting downloadedScript "INFO" "VERSION")
-			local localVersion = dotNetObject "System.Version" (getIniSetting currentScript "INFO" "VERSION")
-			hasNewVersion = ((remoteVersion.CompareTo localVersion) > 0)
-			if (hasNewVersion) do (
-				-- A newer release may add dependencies absent from the installed script.
-				if ((getINISetting downloadedScript "FILES").count > 0) do updateFiles = GCMatterportUpdateManifest downloadedScript
-				for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
-				if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs) do throw "An AO render or GLB export is active. Retry the update when it finishes."
-				for fileName in updateFiles do (
-					local destination = GCMatterportRuntimeFolder + fileName
-					local hadPrevious = doesFileExist destination
-					if (hadPrevious) then (
-						(dotNetClass "System.IO.File").Replace (stage + fileName) destination (stage + fileName + ".previous")
-					) else (
-						(dotNetClass "System.IO.File").Move (stage + fileName) destination
-					)
-					append replacedFiles #(fileName, hadPrevious)
-				)
-				GCMatterportInstallViewerArchive (GCMatterportRuntimeFolder + "model-viewer.zip")
-				tmrRestart.active = true
-			)
-		) catch (updateFailure = getCurrentException() as string)
-		if (updateFailure != undefined) do (
-			for fileIndex in replacedFiles.count to 1 by -1 do (
-				local item = replacedFiles[fileIndex]
-				local destination = GCMatterportRuntimeFolder + item[1]
-				try (
-					if (item[2]) then (
-						(dotNetClass "System.IO.File").Replace (stage + item[1] + ".previous") destination undefined
-					) else deleteFile destination
-				) catch (
-					rollbackFailed = true
-					format "Update rollback failed for %; backups retained in %: %\n" item[1] stage (getCurrentException())
-				)
-			)
-			format "Converter update unavailable; local version retained. %\n" updateFailure
-		)
-		-- The staging directory belongs only to this update invocation.
-		if (not rollbackFailed and doesDirectoryExist stage) do try ((dotNetClass "System.IO.Directory").Delete stage true) catch (format "Update staging cleanup: %\n" (getCurrentException()))
-		return (updateFailure == undefined)
-	)
+        local url = "https://raw.githubusercontent.com/MastaMan/GC-Matterport-GLB-Converter/main/"
+        local currentScript = GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms"
+        local stage = GCMatterportRuntimeFolder + "._update_" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
+        local updateFailure = undefined
+        local rollbackFailed = false
+        try (
+            makeDir stage all: true
+            local updateFiles = GCMatterportUpdateManifest currentScript
+            local downloadedScript = stage + "GC-Matterport-GLB-Converter.ms"
+            GCMatterportDownloadFile (url + "GC-Matterport-GLB-Converter.ms") downloadedScript
+            if ((getINISetting downloadedScript "INFO" "NAME") != (getINISetting currentScript "INFO" "NAME")) do throw "The update belongs to a different script."
+            local remoteVersion = dotNetObject "System.Version" (getINISetting downloadedScript "INFO" "VERSION")
+            local localVersion = dotNetObject "System.Version" (getINISetting currentScript "INFO" "VERSION")
+            if ((remoteVersion.CompareTo localVersion) > 0) do (
+                if ((getINISetting downloadedScript "FILES").count > 0) do updateFiles = GCMatterportUpdateManifest downloadedScript
+                for fileName in updateFiles where (fileName != "GC-Matterport-GLB-Converter.ms") do GCMatterportDownloadFile (url + fileName) (stage + fileName)
+                local preparedFolders = GCMatterportPrepareUpdate stage updateFiles
+                if (_rExportGCMatterportGLBConverter.isRenderingAO or _rExportGCMatterportGLBConverter.isExportingLODs or GCMatterportLiveBusy) do throw "An AO render, GLB export or Live Preview update is active. Retry when it finishes."
+                if (GCMatterportLiveSession != undefined) do GCMatterportLiveStop()
+                GCMatterportStopAllPreviewServers()
+                local updateResult = GCMatterportApplyUpdate GCMatterportRuntimeFolder stage updateFiles preparedFolders
+                rollbackFailed = updateResult.rollbackFailed
+                if (not updateResult.success) do throw updateResult.errorMessage
+                tmrRestart.active = true
+            )
+        ) catch (updateFailure = getCurrentException() as string)
+        if (updateFailure != undefined) do (
+            format "Converter update failed: %\n" updateFailure
+            if (rollbackFailed) do format "Some files could not be restored. Recovery files retained in %\n" stage
+        )
+        if (not rollbackFailed and doesDirectoryExist stage) do try ((dotNetClass "System.IO.Directory").Delete stage true) catch (format "Update staging cleanup: %\n" (getCurrentException()))
+        return (updateFailure == undefined)
+    )
 
-	fn updateWorker = (
+    fn updateWorker = (
 		m = dotnetobject "CSharpUtilities.SynchronizingBackgroundWorker"
 		m.WorkerSupportsCancellation = true 
 		m.CancelAsync() 
@@ -3602,20 +3656,12 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	)
 
 	on tmrRestart tick do (
-		this = getThisScriptFileName()
-		try(fileIn this) catch()
-		vo = getIniSetting this "INFO" "VERSION"
-		m = ("Script updated to version " + vo + "!\n\n\n")
-		for c in (getIniSetting this vo) do (
-			m += c + "\n"
-		)
-		
-		--messageBox m title: "Success!" beep: false
-		print "---UPDATED---"
-		print m
-		tmrRestart.active = false
-	)
-
+        tmrRestart.active = false
+        local scriptPath = GCMatterportRuntimeFolder + "GC-Matterport-GLB-Converter.ms"
+        try (fileIn scriptPath) catch (
+            messageBox ("The update was installed, but the script could not restart.\n" + (getCurrentException() as string)) title: "Converter Update" beep: false
+        )
+    )
     on _rAboutGCMatterportGLBConverter open do (
 		edtDescription.MultiLine = true
 		edtDescription.WordWrap = true

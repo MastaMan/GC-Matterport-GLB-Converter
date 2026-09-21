@@ -46,11 +46,14 @@ git -c safe.directory=[...CURDIR...]/GC-Matterport-GLB-Converter log --oneline -
 - Deleted: ...
 ```
 
-3. Verify the runtime files and updater manifest. This script has no [FILES]
-section: updateFiles in the About updater lists denoise.bat, vdenoise.xml,
-jpegoptim.exe, gltfpack.exe, gltfpack_webgl.bat, model-viewer.zip,
-playcanvas-viewer.zip, and GC-Matterport-GLB-Converter.ms. Keep this list in sync
-with the files shipped at the update endpoint.
+3. Verify the runtime files in the script header's [FILES] section. Each entry
+is a filename followed by `=`; values are unused. Keep this single manifest in
+sync with the files shipped at the update endpoint. The updater reads its own
+manifest with getINISetting and, for a newer script containing [FILES], uses
+that release's manifest so newly added dependencies are included. The entry
+script must be listed and is replaced last. Older installed updaters that do
+not read [FILES] still require a one-time complete package update to acquire
+new dependencies.
 
 - Store both viewers as ZIP archives only. Do not commit extracted model-viewer/
   or playcanvas-viewer/, staged models, generated GLB/AO files, logs, or temporary
