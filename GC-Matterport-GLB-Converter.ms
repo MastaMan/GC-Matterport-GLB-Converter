@@ -2244,10 +2244,36 @@ struct GCMatterportAOClipboardEntry (
 )
 global GCMatterportAOClipboard
 
+fn GCMatterportOpenSceneFolder = (
+	if (maxFileName == "" or maxFilePath == "") do (
+		messageBox "Save the MAX scene first to open its folder." title: "Open Scene Folder" beep: false
+		return false
+	)
+	local sceneFolder = maxFilePath
+	if (not doesDirectoryExist sceneFolder) do (
+		messageBox ("The scene folder is unavailable:\n" + sceneFolder) title: "Open Scene Folder" beep: false
+		return false
+	)
+	try (
+		-- Pass the directory directly to the Windows shell; no command-line quoting.
+		local startInfo = dotNetObject "System.Diagnostics.ProcessStartInfo"
+		startInfo.FileName = sceneFolder
+		startInfo.UseShellExecute = true
+		local launchedProcess = (dotNetClass "System.Diagnostics.Process").Start startInfo
+		if (launchedProcess != undefined) do launchedProcess.Dispose()
+	) catch (
+		messageBox ("Could not open the scene folder:\n" + sceneFolder + "\n\n" + (getCurrentException() as string)) title: "Open Scene Folder" beep: false
+		return false
+	)
+	return true
+)
+
 rcmenu GCMatterportLODContextMenu (
 	menuItem previewLODItem "Preview in Google Model Viewer"
 	menuItem previewPCLODItem "Preview in PlayCanvas Viewer"
 	menuItem liveMaterialsItem "Live Preview Materials..."
+	separator sceneFolderSeparator
+	menuItem openSceneFolderItem "Open Scene Folder"
 	separator previewSeparator
 	menuItem copyPropertiesItem "Copy Material Properties"
 	menuItem pastePropertiesItem "Paste Material Properties"
@@ -2262,6 +2288,7 @@ rcmenu GCMatterportLODContextMenu (
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
 	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
 	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 344 110)
+	on openSceneFolderItem picked do GCMatterportOpenSceneFolder()
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
 	on pastePropertiesItem picked do _rExportGCMatterportGLBConverter.pasteLODProperties()
 	on deleteLODsItem picked do _rExportGCMatterportGLBConverter.deleteSelectedLODs()
