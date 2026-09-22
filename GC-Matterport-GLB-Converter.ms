@@ -707,19 +707,14 @@ fn GCMatterportGeometrySummary sceneNode = (
 		local cached = GCMatterportGeometrySummaryCache[cachedIndex]
 		return cached[3]
 	)
-	local resultData = #(0, "Polys", #(), undefined)
+	local resultData = #(0, "Tris", #(), undefined)
 	local evaluatedMesh = undefined
 	try (
 		if (not isValidNode sceneNode or superclassOf sceneNode != GeometryClass) do throw "geometry unavailable"
-		if (classOf sceneNode == Editable_Poly or classOf sceneNode == PolyMeshObject) then (
-			resultData[1] = polyop.getNumFaces sceneNode
-			for faceIndex in 1 to resultData[1] do appendIfUnique resultData[3] (polyop.getFaceMatID sceneNode faceIndex)
-		) else (
-			evaluatedMesh = snapshotAsMesh sceneNode
-			resultData[1] = evaluatedMesh.numfaces
-			resultData[2] = "Tris"
-			for faceIndex in 1 to evaluatedMesh.numfaces do appendIfUnique resultData[3] (getFaceMatID evaluatedMesh faceIndex)
-		)
+		-- Count the evaluated triangle mesh for every geometry type, including Editable Poly.
+		evaluatedMesh = snapshotAsMesh sceneNode
+		resultData[1] = evaluatedMesh.numfaces
+		for faceIndex in 1 to evaluatedMesh.numfaces do appendIfUnique resultData[3] (getFaceMatID evaluatedMesh faceIndex)
 	) catch (resultData[4] = getCurrentException() as string)
 	if evaluatedMesh != undefined do delete evaluatedMesh
 	local cacheRecord = #(sceneNode,sampleTime,resultData)
@@ -2409,7 +2404,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		button btnRefresList "Refresh List" width: 150 across: 2
 		button btnAddToLOD "Add to LOD" width: 150
 		button btnAssignDefaultMaterials "Assign Default Materials" width: 200 offset: [6, 0] align: #left across: 2
-        spinner spnDefaultMaterialCount "IDs cnt.: " range: [1,256,6] offset: [0, 2] type: #integer fieldWidth: 42 width: 86 align: #right toolTip: "Number of glTF material IDs to create (1-1000)."
+        spinner spnDefaultMaterialCount "IDs cnt.: " range: [1,256,1] offset: [0, 2] type: #integer fieldWidth: 42 width: 86 align: #right toolTip: "Number of glTF material IDs to create (1-1000)."
 	)
 	
 	group "Materials" (
@@ -2428,6 +2423,13 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		checkbox cbxAODenoise "V-Ray Denoiser" toolTip: "Use V-Ray Denoiser" width: 108 align: #left checked: true enabled: false
 	)
 
+	group "Transformation" (
+		button btnPivotBottom "Bottom" width: 100 across: 3
+		button btnPivotCenter "Center" width: 100
+		button btnPivotTop "Top" width: 100
+		button btnMoveToCenter "Move to Center Scene" width: 310 align: #center
+	)
+
 	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
 
 	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
@@ -2444,6 +2446,56 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	local previousSceneSelection = undefined
 
 	timer tmrLODRefresh interval: 500 active: false
+
+	fn transformSelectedObjects operationMode = (
+		local selectedNodes = for sceneNode in selection where (isValidNode sceneNode) collect sceneNode
+		if (selectedNodes.count == 0) do (
+			messageBox "Select one or more scene objects first." title: "Transformation" beep: false
+			return false
+		)
+		local hierarchyEntries = for sceneNode in selectedNodes collect (
+			local nodeDepth = 0
+			local ancestorNode = sceneNode.parent
+			while (ancestorNode != undefined) do (
+				nodeDepth += 1
+				ancestorNode = ancestorNode.parent
+			)
+			#(nodeDepth, sceneNode)
+		)
+		fn compareDepth firstEntry secondEntry = (
+			return firstEntry[1] - secondEntry[1]
+		)
+		qsort hierarchyEntries compareDepth
+		selectedNodes = for hierarchyEntry in hierarchyEntries collect hierarchyEntry[2]
+		-- Capture world targets before moving parents, then apply parents before children.
+		local targetPoints = for sceneNode in selectedNodes collect (
+			local worldBounds = nodeGetBoundingBox sceneNode (matrix3 1)
+			local boundsCenter = (worldBounds[1] + worldBounds[2]) * 0.5
+			case operationMode of (
+				#bottom: [boundsCenter.x, boundsCenter.y, worldBounds[1].z]
+				#top: [boundsCenter.x, boundsCenter.y, worldBounds[2].z]
+				#center: boundsCenter
+				#move: ((in coordsys world sceneNode.pos) + [-boundsCenter.x, -boundsCenter.y, -worldBounds[1].z])
+			)
+		)
+		undo "Transform Matterport selection" on (
+			for nodeIndex in 1 to selectedNodes.count do (
+				local sceneNode = selectedNodes[nodeIndex]
+				if (operationMode == #move) then (
+					in coordsys world sceneNode.pos = targetPoints[nodeIndex]
+				) else (
+					in coordsys world sceneNode.pivot = targetPoints[nodeIndex]
+				)
+			)
+		)
+		redrawViews()
+		return true
+	)
+
+	on btnPivotBottom pressed do transformSelectedObjects #bottom
+	on btnPivotCenter pressed do transformSelectedObjects #center
+	on btnPivotTop pressed do transformSelectedObjects #top
+	on btnMoveToCenter pressed do transformSelectedObjects #move
 
 	fn getListHandle listControl = (
 		for controlHandle in listControl.hwnd do (
@@ -3422,65 +3474,6 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 )
 
 
-rollout _rTransformationGCMatterportGLBConverter "Transformation" category: 3 (
-	group "Set Pivot" (
-		button btnPivotBottom "Bottom" width: 100 across: 3
-		button btnPivotCenter "Center" width: 100
-		button btnPivotTop "Top" width: 100
-	)
-	button btnMoveToCenter "Move to Center Scene" width: 310 align: #center
-
-	fn transformSelectedObjects operationMode = (
-		local selectedNodes = for sceneNode in selection where (isValidNode sceneNode) collect sceneNode
-		if (selectedNodes.count == 0) do (
-			messageBox "Select one or more scene objects first." title: "Transformation" beep: false
-			return false
-		)
-		local hierarchyEntries = for sceneNode in selectedNodes collect (
-			local nodeDepth = 0
-			local ancestorNode = sceneNode.parent
-			while (ancestorNode != undefined) do (
-				nodeDepth += 1
-				ancestorNode = ancestorNode.parent
-			)
-			#(nodeDepth, sceneNode)
-		)
-		fn compareDepth firstEntry secondEntry = (
-			return firstEntry[1] - secondEntry[1]
-		)
-		qsort hierarchyEntries compareDepth
-		selectedNodes = for hierarchyEntry in hierarchyEntries collect hierarchyEntry[2]
-		-- Capture world targets before moving parents, then apply parents before children.
-		local targetPoints = for sceneNode in selectedNodes collect (
-			local worldBounds = nodeGetBoundingBox sceneNode (matrix3 1)
-			local boundsCenter = (worldBounds[1] + worldBounds[2]) * 0.5
-			case operationMode of (
-				#bottom: [boundsCenter.x, boundsCenter.y, worldBounds[1].z]
-				#top: [boundsCenter.x, boundsCenter.y, worldBounds[2].z]
-				#center: boundsCenter
-				#move: ((in coordsys world sceneNode.pos) + [-boundsCenter.x, -boundsCenter.y, -worldBounds[1].z])
-			)
-		)
-		undo "Transform Matterport selection" on (
-			for nodeIndex in 1 to selectedNodes.count do (
-				local sceneNode = selectedNodes[nodeIndex]
-				if (operationMode == #move) then (
-					in coordsys world sceneNode.pos = targetPoints[nodeIndex]
-				) else (
-					in coordsys world sceneNode.pivot = targetPoints[nodeIndex]
-				)
-			)
-		)
-		redrawViews()
-		return true
-	)
-
-	on btnPivotBottom pressed do transformSelectedObjects #bottom
-	on btnPivotCenter pressed do transformSelectedObjects #center
-	on btnPivotTop pressed do transformSelectedObjects #top
-	on btnMoveToCenter pressed do transformSelectedObjects #move
-)
-
 struct GCMatterportUpdateResultData (success = false, errorMessage, rollbackFailed = false)
 
 fn GCMatterportPrepareUpdate stage updateFiles = (
@@ -3725,6 +3718,5 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 local hasLODsAtStartup = ((GCMatterportGetData()).count > 0)
 addRollout _rBoilerplateGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: hasLODsAtStartup
 addRollout _rExportGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: (not hasLODsAtStartup)
-addRollout _rTransformationGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true
 addRollout _rAboutGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true 
 )
