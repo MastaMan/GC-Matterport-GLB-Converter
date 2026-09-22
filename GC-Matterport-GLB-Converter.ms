@@ -2409,7 +2409,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	
 	group "Materials" (
 		multiListbox lbxMaterials "" items: #() height: 6 offset: [-2, 0] width: 326
-		button btnTransferUV "Transfer All IDs: Channel 1 -> 2" width: 310 align: #center
+		button btnSelectAllMaterials "Select All" width: 70 across: 2 enabled: false align: #left
+		button btnTransferUV "Transfer All IDs: Channel 1 -> 2" width: 242 align: #right
 	)
 
 	group "Corona AO Settings" (
@@ -2520,6 +2521,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	fn refreshAOSettings = (
+		btnSelectAllMaterials.enabled = (lbxMaterials.items.count > 0 and not isRenderingAO and not isExportingLODs)
 		local selectedCount = lbxMaterials.selection.numberSet
 		btnRenderAO.text = "Render AO for Selected IDs (" + (selectedCount as string) + ")"
 		btnRenderAO.enabled = (selectedCount > 0 and not isRenderingAO and not isExportingLODs)
@@ -2643,6 +2645,16 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		return materialEntries
 	)
 
+	on btnSelectAllMaterials pressed do (
+		if (not isRenderingAO and not isExportingLODs) do (
+			refreshMaterials()
+			local selectedRows = #{}
+			for rowIndex in 1 to materialEntries.count do selectedRows[rowIndex] = true
+			lbxMaterials.selection = selectedRows
+			refreshAOSettings()
+		)
+	)
+
 	fn batchAOSetting settingField settingValue = (
 		if (isRenderingAO) do return false
 		local failures = #()
@@ -2710,7 +2722,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local previousTimerActive = tmrLODRefresh.active
 		local originalLODSelection = lbxLODs.selection
 		local originalMaterialSelection = lbxMaterials.selection
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isRenderingAO = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -2773,7 +2785,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local reportLines = #()
 		local previousTimerActive = tmrLODRefresh.active
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isExportingLODs = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
