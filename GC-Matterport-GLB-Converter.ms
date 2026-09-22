@@ -33,7 +33,7 @@ GC-Matterport-GLB-Converter.ms=
 
 try(destroyDialog GCMatterportLiveRollout) catch()
 try(closeRolloutFloater floaterGCMatterportGLBConverter) catch()
-global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 580
+global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 740
 
 struct '@' (
 	currScript = getThisScriptFileName(),
