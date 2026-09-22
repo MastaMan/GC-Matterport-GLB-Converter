@@ -358,11 +358,12 @@ struct GCMatterportAOBakeResult (filePath, errorMessage, cancelled = false)
 
 struct GCMatterportAOOutputState (conversion, colorSpace, display, viewTransform)
 
+-- Omit fileType for pre-2026 compatibility; newer Max defaults to #GammaEncoded (JPEG).
 fn GCMatterportCaptureAOOutput = (
 	local outputSpace = ""
 	local outputDisplay = ""
 	local outputView = ""
-	local conversionType = ColorPipelineMgr.GetDefaultOutputConversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView fileType: #GammaEncoded
+	local conversionType = ColorPipelineMgr.GetDefaultOutputConversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView
 	return GCMatterportAOOutputState conversion: conversionType colorSpace: outputSpace display: outputDisplay viewTransform: outputView
 )
 
@@ -370,7 +371,7 @@ fn GCMatterportRestoreAOOutput outputState = (
 	local outputSpace = outputState.colorSpace
 	local outputDisplay = outputState.display
 	local outputView = outputState.viewTransform
-	if (not ColorPipelineMgr.SetDefaultOutputConversion outputState.conversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView fileType: #GammaEncoded) do throw "Could not restore the original JPEG output color conversion."
+	if (not ColorPipelineMgr.SetDefaultOutputConversion outputState.conversion colorSpace: &outputSpace display: &outputDisplay viewTransform: &outputView) do throw "Could not restore the original JPEG output color conversion."
 	local restoredState = GCMatterportCaptureAOOutput()
 	if (restoredState.conversion != outputState.conversion or restoredState.colorSpace != outputState.colorSpace or restoredState.display != outputState.display or restoredState.viewTransform != outputState.viewTransform) do throw "JPEG output color conversion did not restore to its original settings."
 	return true
@@ -411,7 +412,7 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 		-- Native Corona RTT uses the default JPEG output transform, as in GC Configurator.
 		originalAOOutput = GCMatterportCaptureAOOutput()
 		restoreAOOutput = true
-		if (not ColorPipelineMgr.SetDefaultOutputConversion #NoConversion fileType: #GammaEncoded) do throw "Could not disable the JPEG output display transform for AO."
+		if (not ColorPipelineMgr.SetDefaultOutputConversion #NoConversion) do throw "Could not disable the JPEG output display transform for AO."
 		if ((GCMatterportCaptureAOOutput()).conversion != #NoConversion) do throw "AO requires JPEG output without a display transform."
 		-- Work on an evaluated copy. The original stack, UVs and bake properties stay intact.
 		subObjectLevel = 0
