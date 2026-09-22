@@ -3127,7 +3127,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		)
 		if ((findString (toLower sourceLayerName) "_lod") != undefined) do (
 			local transferMessage = "Move the selected object to another LOD layer.\nSource: " + sourceLayerName + "\nTarget: " + selectedLayerName
-			if (not GCMatterportConfirmTyped transferMessage expectedText: "OK") do return false
+			if (not queryBox transferMessage title: "Confirm LOD transfer" beep: false defaultButton: 2) do return false
 		)
 		-- The modal dialog may allow scene callbacks to run; revalidate captured references.
 		if (not isValidNode targetNode) do (
