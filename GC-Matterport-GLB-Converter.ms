@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.0.0
+VERSION = 1.1.0
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,18 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.1.0]
+* Changed: Assign Default Materials starts with one Material ID instead of six. =
+* Fixed: LOD statistics now report evaluated triangle counts (Tris), including Editable Poly objects. =
+* Changed: Moved Bottom, Center, Top and Move to Center Scene into Exporter between Corona AO Settings and Render AO; removed the redundant Set Pivot label. =
+* Improved: Increased the main window height to 740 pixels while retaining its 360-pixel width. =
+* Added: Select All beside Transfer All IDs selects every material ID in the Materials list. =
+* Fixed: Removed the optional fileType keyword from AO color-conversion calls while retaining output-state restoration. =
+* Changed: Add to LOD now uses a standard Yes/No confirmation instead of requiring typed OK. =
+* Fixed: AO assignment preserves existing glTF materials and shared references, reuses the existing AO Bitmap, and refreshes its file on repeated bakes. =
+* Added: Open Scene Folder in the LOD context menu opens the saved MAX scene folder and handles unsaved or unavailable paths. =
+* Changed: AO defaults to 1024 for every LOD and material. Explicit resolution overrides and separate export texture limits remain unchanged. =
 
 [1.0.0]
 * Initial release =
