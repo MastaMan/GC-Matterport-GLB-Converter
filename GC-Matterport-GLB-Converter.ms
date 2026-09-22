@@ -139,6 +139,11 @@ fn GCMatterportIsCurrentMaterialEntry materialEntry = (
 )
 
 fn GCMatterportAutomaticAOResolution layerName = (
+	return 1024
+)
+
+-- Export texture limits remain independent of the default AO bake resolution.
+fn GCMatterportExportTextureLimit layerName = (
 	if (layerName.count < 4) do return undefined
 	case (toUpper (substring layerName (layerName.count - 3) 4)) of (
 		"LOD3": return 4096
@@ -1082,7 +1087,7 @@ fn GCMatterportExportPreflight layerNames = (
 		local lodLayer = LayerManager.getLayerFromName layerName
 		local layerNodes = #()
 		if (lodLayer != undefined) do lodLayer.nodes &layerNodes
-		local limitPixels = GCMatterportAutomaticAOResolution layerName
+		local limitPixels = GCMatterportExportTextureLimit layerName
 		if (limitPixels == undefined) do append issues (layerName + ": use a LOD0, LOD1, LOD2 or LOD3 suffix so the texture limit is known.")
 		local fileName = GCMatterportExportFileName layerName
 		if ((findItem outputNames (toLower fileName)) != 0) do append issues (layerName + ": its export filename conflicts with another selected LOD. Rename one layer.")
@@ -2599,7 +2604,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			ddlAOResolution.selection = findItem #(128, 256, 512, 1024, 2048, 4096) aoOptions.resolution
 		) else (
 			lblAOSelection.text = if (materialEntry == undefined) then "Select one material." else "AO settings unavailable."
-			lblAOSelection.toolTip = if (materialEntry == undefined) then "Select exactly one material to edit its AO settings." else "AO settings invalid or LOD suffix unsupported."
+			lblAOSelection.toolTip = if (materialEntry == undefined) then "Select exactly one material to edit its AO settings." else "AO settings invalid."
 			spnAOPasses.value = 15
 			spnAOSize.value = 5.0
 			ddlAOResolution.selection = 4
