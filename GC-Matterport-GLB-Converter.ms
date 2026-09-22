@@ -549,32 +549,42 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 	return bakeResult
 )
 
-fn GCMatterportAssignAO materialEntry filePath = (
-	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The target material changed during rendering. The AO image was kept without assigning it."
-	local parentMaterial = materialEntry.nodeRef.material
-	local replacementMaterial = copy materialEntry.materialRef
-	local aoMap = Bitmaptexture name: "AO"
-	-- AO stores scalar data: bypass image input rules and refresh an overwritten file.
+fn GCMatterportApplyAOMap materialRef filePath = (
+	if (materialRef == undefined or classOf materialRef != glTFMaterial) do throw "AO assignment requires an existing glTF material."
+	local previousMap = materialRef.ambientOcclusionMap
+	if (previousMap != undefined and classOf previousMap != Bitmaptexture) do throw "The existing AO map is not a Bitmap. It was preserved; assign a Bitmap to the AO slot before updating it."
+	local previousStrength = materialRef.ambientOcclusion
+	local previousBitmap = if (previousMap != undefined) then previousMap.bitmap else undefined
+	local previousChannel = if (previousMap != undefined) then previousMap.coords.mapChannel else undefined
+	-- AO is scalar data. Load before editing the material, including overwritten files.
 	local aoBitmap = if (ColorPipelineMgr != undefined and ColorPipelineMgr.DataColorSpace != "") then (openBitmap filePath colorSpace: ColorPipelineMgr.DataColorSpace) else (openBitmap filePath gamma: 1.0)
 	if (aoBitmap == undefined) do throw "Could not open the completed AO bitmap."
 	forceReloadBitmapFile aoBitmap
-	aoMap.bitmap = aoBitmap
-	aoMap.coords.mapChannel = 2
-	replacementMaterial.ambientOcclusionMap = aoMap
-	replacementMaterial.ambientOcclusion = 1.0
-	if (not GCMatterportHasAOMap replacementMaterial) do throw "The completed AO map could not be validated."
-	undo "Assign per-ID Matterport AO" on (
-		-- Preserve other slot references when isolating a shared parent MultiMaterial.
-		if ((refs.dependentNodes parentMaterial).count > 1) do (
-			local isolatedParent = copy parentMaterial
-			isolatedParent.materialList = for subMaterial in parentMaterial.materialList collect subMaterial
-			parentMaterial = isolatedParent
+	local aoMap = if (previousMap != undefined) then previousMap else (Bitmaptexture name: "AO")
+	undo "Assign Matterport AO" on (
+		try (
+			-- Preserve material and map identities, including their shared references.
+			aoMap.bitmap = aoBitmap
+			aoMap.coords.mapChannel = 2
+			if (previousMap == undefined) do materialRef.ambientOcclusionMap = aoMap
+			if (previousMap == undefined or previousStrength <= 0) do materialRef.ambientOcclusion = 1.0
+			if (not GCMatterportHasAOMap materialRef) do throw "The completed AO map could not be validated."
+		) catch (
+			materialRef.ambientOcclusionMap = previousMap
+			materialRef.ambientOcclusion = previousStrength
+			if (previousMap != undefined) do (
+				previousMap.bitmap = previousBitmap
+				previousMap.coords.mapChannel = previousChannel
+			)
+			throw()
 		)
-		parentMaterial.materialList[materialEntry.slotIndex] = replacementMaterial
-		materialEntry.nodeRef.material = parentMaterial
 	)
-	materialEntry.materialRef = replacementMaterial
 	return true
+)
+
+fn GCMatterportAssignAO materialEntry filePath = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The target material changed during rendering. The AO image was kept without assigning it."
+	return GCMatterportApplyAOMap materialEntry.materialRef filePath
 )
 
 fn GCMatterportFormatMaterialRow materialEntry = (
