@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.1.0
+VERSION = 1.1.1
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,11 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.1.1]
+* Added: Configurable Corona AO occluded color, default RGB 40, 40, 40. =
+* Added: AO color persistence in scene properties and Copy/Paste Material Properties. =
+* Added: Color indicator for materials with a non-default AO color. =
 
 [1.1.0]
 * Changed: Assign Default Materials starts with one Material ID instead of six. =
