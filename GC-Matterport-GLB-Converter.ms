@@ -122,6 +122,7 @@ struct GCMatterportScenePropertyStore (
 
 struct GCMatterportAOOptions (
 	useCoronaAO = true,
+	occludedColor = color 40 40 40,
 	passes = 15,
 	sizeCM = 5.0,
 	useVRayDenoiser = true,
@@ -173,6 +174,11 @@ fn GCMatterportGetEffectiveAOOptions materialEntry = (
 	local propertyKey = GCMatterportAOKey materialEntry
 	local aoOptions = GCMatterportAOOptions()
 	aoOptions.useCoronaAO = GCMatterportSceneProperties.getValue (propertyKey + "enabled") true
+	local colorChannels = for channelName in #("occludedColorR", "occludedColorG", "occludedColorB") collect (GCMatterportSceneProperties.getValue (propertyKey + channelName) 40.0)
+	for channelValue in colorChannels do (
+		if ((classOf channelValue != Float and classOf channelValue != Integer) or not (channelValue >= 0 and channelValue <= 255)) do return undefined
+	)
+	aoOptions.occludedColor = color colorChannels[1] colorChannels[2] colorChannels[3]
 	aoOptions.passes = GCMatterportSceneProperties.getValue (propertyKey + "passes") 15
 	aoOptions.sizeCM = GCMatterportSceneProperties.getValue (propertyKey + "sizeCM") 5.0
 	aoOptions.useVRayDenoiser = GCMatterportSceneProperties.getValue (propertyKey + "denoise") true
@@ -465,6 +471,7 @@ fn GCMatterportBakeAO materialEntry aoOptions outputFolder denoiserPath = (
 			aoMaterial.baseColor = white
 			aoMaterial.baseRoughness = 1.0
 			local aoMap = CoronaAO()
+			aoMap.colorOccluded = aoOptions.occludedColor
 			aoMap.maxDistance = aoOptions.sizeWorldUnits
 			aoMap.colorSpread = 0.022
 			aoMap.quality = 64
@@ -621,6 +628,7 @@ fn GCMatterportFormatMaterialRow materialEntry = (
 			append differences (sizeCaption + " cm")
 		)
 		if (not aoOptions.useVRayDenoiser) do append differences "No Denoise"
+		if (aoOptions.occludedColor != (color 40 40 40)) do append differences "Color"
 	)
 	if (differences.count > 0) do (
 		rowText += " ["
@@ -683,6 +691,9 @@ fn GCMatterportSaveAOOptions materialEntry aoOptions = (
 	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do return false
 	local propertyKey = GCMatterportAOKey materialEntry
 	GCMatterportSceneProperties.setValue (propertyKey + "enabled") aoOptions.useCoronaAO
+	GCMatterportSceneProperties.setValue (propertyKey + "occludedColorR") aoOptions.occludedColor.r
+	GCMatterportSceneProperties.setValue (propertyKey + "occludedColorG") aoOptions.occludedColor.g
+	GCMatterportSceneProperties.setValue (propertyKey + "occludedColorB") aoOptions.occludedColor.b
 	GCMatterportSceneProperties.setValue (propertyKey + "passes") aoOptions.passes
 	GCMatterportSceneProperties.setValue (propertyKey + "sizeCM") aoOptions.sizeCM
 	GCMatterportSceneProperties.setValue (propertyKey + "denoise") aoOptions.useVRayDenoiser
@@ -2257,7 +2268,7 @@ rollout GCMatterportLiveRollout "Live Preview Materials" (
 
 
 struct GCMatterportAOClipboardEntry (
-	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution
+	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution, occludedColor = color 40 40 40
 )
 global GCMatterportAOClipboard
 
@@ -2469,8 +2480,9 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	group "Corona AO Settings" (
-		checkbox cbxUseCoronaAO "Use Corona AO" width: 115 align: #left across: 2 checked: true enabled: false
-		label lblAOSelection "Select one material." align: #right width: 188
+		checkbox cbxUseCoronaAO "Use Corona AO" width: 105 align: #left across: 3 checked: true enabled: false
+		colorPicker cpAOColor "" color: (color 40 40 40) width: 32 height: 16 align: #left enabled: false toolTip: "Corona AO occluded color"
+		label lblAOSelection "Select one material." align: #right width: 156
 		checkbox cbxAOOverride "Override Resolution" width: 125 enabled: false across: 3 align: #left
 		dropdownlist ddlAOResolution "" items: #("128", "256", "512", "1024", "2048", "4096") selection: 4 width: 64 enabled: false align: #left
 		label lblDefaultAOResolution "" width: 104 align: #left visible: false
@@ -2594,6 +2606,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local canEdit = (aoOptions != undefined)
 		cbxUseCoronaAO.enabled = canEdit
 		local canEditAO = (canEdit and aoOptions.useCoronaAO)
+		cpAOColor.enabled = canEditAO
 		spnAOPasses.enabled = canEditAO
 		spnAOSize.enabled = canEditAO
 		cbxAOOverride.enabled = canEditAO
@@ -2603,9 +2616,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			local materialCaption = "Material ID " + (materialEntry.materialID as string) + ": " + materialEntry.materialRef.name
 			lblAOSelection.toolTip = materialCaption
 			local shortCaption = materialCaption
-			while ((getTextExtent shortCaption).x > 180 and shortCaption.count > 4) do shortCaption = substring shortCaption 1 (shortCaption.count - 1)
+			while ((getTextExtent shortCaption).x > 148 and shortCaption.count > 4) do shortCaption = substring shortCaption 1 (shortCaption.count - 1)
 			lblAOSelection.text = if (shortCaption == materialCaption) then materialCaption else ((substring shortCaption 1 (amax 1 (shortCaption.count - 3))) + "...")
 			cbxUseCoronaAO.checked = aoOptions.useCoronaAO
+			cpAOColor.color = aoOptions.occludedColor
 			spnAOPasses.value = aoOptions.passes
 			spnAOSize.value = aoOptions.sizeCM
 			cbxAOOverride.checked = aoOptions.customResolution
@@ -2617,6 +2631,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		) else (
 			lblAOSelection.text = if (materialEntry == undefined) then "Select one material." else "AO settings unavailable."
 			lblAOSelection.toolTip = if (materialEntry == undefined) then "Select exactly one material to edit its AO settings." else "AO settings invalid."
+			cpAOColor.color = color 40 40 40
 			spnAOPasses.value = 15
 			spnAOSize.value = 5.0
 			ddlAOResolution.selection = 4
@@ -2639,6 +2654,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 		if (aoOptions == undefined) do return false
 		aoOptions.useCoronaAO = cbxUseCoronaAO.checked
+		aoOptions.occludedColor = copy cpAOColor.color
 		aoOptions.passes = spnAOPasses.value
 		aoOptions.sizeCM = spnAOSize.value
 		aoOptions.useVRayDenoiser = cbxAODenoise.checked
@@ -2653,6 +2669,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	on cbxUseCoronaAO changed checkedState do saveAOSettings #enabled
+	on cpAOColor changed selectedColor do saveAOSettings #occludedColor
 	on spnAOPasses changed spinnerValue do saveAOSettings #passes
 	on spnAOSize changed spinnerValue do saveAOSettings #size
 	on cbxAODenoise changed checkedState do saveAOSettings #denoise
@@ -2777,7 +2794,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local previousTimerActive = tmrLODRefresh.active
 		local originalLODSelection = lbxLODs.selection
 		local originalMaterialSelection = lbxMaterials.selection
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isRenderingAO = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -2840,7 +2857,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local reportLines = #()
 		local previousTimerActive = tmrLODRefresh.active
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isExportingLODs = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -3073,8 +3090,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local clipboardEntries = #()
 		for materialEntry in entries do (
 			local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
-			-- Scalar values only: no node/material/option references or computed resolution.
-			append clipboardEntries (GCMatterportAOClipboardEntry materialID: materialEntry.materialID useCoronaAO: aoOptions.useCoronaAO passes: aoOptions.passes sizeCM: aoOptions.sizeCM useVRayDenoiser: aoOptions.useVRayDenoiser customResolution: aoOptions.customResolution manualResolution: aoOptions.manualResolution)
+			-- Copy color by value; no node/material/option references or computed resolution.
+			append clipboardEntries (GCMatterportAOClipboardEntry materialID: materialEntry.materialID useCoronaAO: aoOptions.useCoronaAO passes: aoOptions.passes sizeCM: aoOptions.sizeCM useVRayDenoiser: aoOptions.useVRayDenoiser customResolution: aoOptions.customResolution manualResolution: aoOptions.manualResolution occludedColor: (copy aoOptions.occludedColor))
 		)
 		GCMatterportAOClipboard = clipboardEntries
 		return true
@@ -3104,6 +3121,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 					) else (
 						append matchedIDs materialEntry.materialID
 						local aoOptions = GCMatterportAOOptions useCoronaAO: sourceSettings.useCoronaAO passes: sourceSettings.passes sizeCM: sourceSettings.sizeCM useVRayDenoiser: sourceSettings.useVRayDenoiser customResolution: sourceSettings.customResolution manualResolution: sourceSettings.manualResolution
+						-- A clipboard made before this version has no color field.
+						if (isProperty sourceSettings #occludedColor) do aoOptions.occludedColor = copy sourceSettings.occludedColor
 						-- Save writes the target node/ID key; auto resolution is recomputed for its LOD.
 						try (
 							if (GCMatterportSaveAOOptions materialEntry aoOptions) then pastedCount += 1 else append reportLines (entryCaption + ": skipped; the material assignment changed.")
