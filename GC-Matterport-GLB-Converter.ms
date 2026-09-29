@@ -131,7 +131,7 @@ struct GCMatterportScenePropertyStore (
 
 struct GCMatterportAOOptions (
 	useCoronaAO = true,
-	occludedColor = color 40 40 40,
+	occludedColor = color 140 140 140,
 	passes = 15,
 	sizeCM = 5.0,
 	useVRayDenoiser = true,
@@ -183,7 +183,7 @@ fn GCMatterportGetEffectiveAOOptions materialEntry = (
 	local propertyKey = GCMatterportAOKey materialEntry
 	local aoOptions = GCMatterportAOOptions()
 	aoOptions.useCoronaAO = GCMatterportSceneProperties.getValue (propertyKey + "enabled") true
-	local colorChannels = for channelName in #("occludedColorR", "occludedColorG", "occludedColorB") collect (GCMatterportSceneProperties.getValue (propertyKey + channelName) 40.0)
+	local colorChannels = for channelName in #("occludedColorR", "occludedColorG", "occludedColorB") collect (GCMatterportSceneProperties.getValue (propertyKey + channelName) 140.0)
 	for channelValue in colorChannels do (
 		if ((classOf channelValue != Float and classOf channelValue != Integer) or not (channelValue >= 0 and channelValue <= 255)) do return undefined
 	)
@@ -645,7 +645,7 @@ fn GCMatterportFormatMaterialRow materialEntry = (
 			append differences (sizeCaption + " cm")
 		)
 		if (not aoOptions.useVRayDenoiser) do append differences "No Denoise"
-		if (aoOptions.occludedColor != (color 40 40 40)) do append differences "Color"
+		if (aoOptions.occludedColor != (color 140 140 140)) do append differences "Color"
 	)
 	if (differences.count > 0) do (
 		rowText += " ["
@@ -1026,7 +1026,7 @@ fn GCMatterportPickAOColor = (
 	local colorDialog
 	rollout colorDialog "Override Color" (
 		local acceptedColor = undefined
-		colorPicker cpColor "AO color: " color: (color 40 40 40) width: 240 height: 44 align: #center
+		colorPicker cpColor "AO color: " color: (color 140 140 140) width: 240 height: 44 align: #center
 		button btnAccept "OK" width: 110 height: 24 across: 2 align: #left offset: [0, 10]
 		button btnCancel "Cancel" width: 110 height: 24 align: #right offset: [0, 10]
 		on colorDialog open do cpColor.color = _rExportGCMatterportGLBConverter.selectedAOColor()
@@ -2304,7 +2304,7 @@ rollout GCMatterportLiveRollout "Live Preview Materials" (
 
 
 struct GCMatterportAOClipboardEntry (
-	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution, occludedColor = color 40 40 40
+	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution, occludedColor = color 140 140 140
 )
 global GCMatterportAOClipboard
 
@@ -2517,7 +2517,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 
 	group "Corona AO Settings" (
 		checkbox cbxUseCoronaAO "Use Corona AO" width: 105 align: #left across: 3 checked: true enabled: false
-		colorPicker cpAOColor "" color: (color 40 40 40) width: 32 height: 16 align: #left enabled: false toolTip: "Corona AO occluded color"
+		colorPicker cpAOColor "" color: (color 140 140 140) width: 32 height: 16 align: #left enabled: false toolTip: "Corona AO occluded color"
 		label lblAOSelection "Select one material." align: #right width: 156
 		checkbox cbxAOOverride "Override Resolution" width: 125 enabled: false across: 3 align: #left
 		dropdownlist ddlAOResolution "" items: #("128", "256", "512", "1024", "2048", "4096") selection: 4 width: 64 enabled: false align: #left
@@ -2667,7 +2667,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		) else (
 			lblAOSelection.text = if (materialEntry == undefined) then "Select one material." else "AO settings unavailable."
 			lblAOSelection.toolTip = if (materialEntry == undefined) then "Select exactly one material to edit its AO settings." else "AO settings invalid."
-			cpAOColor.color = color 40 40 40
+			cpAOColor.color = color 140 140 140
 			spnAOPasses.value = 15
 			spnAOSize.value = 5.0
 			ddlAOResolution.selection = 4
@@ -2798,9 +2798,9 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 
 	fn selectedAOColor = (
 		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
-		if (selectedRows.count == 0) do return (color 40 40 40)
+		if (selectedRows.count == 0) do return (color 140 140 140)
 		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntries[selectedRows[1]]
-		return (if (aoOptions == undefined) then (color 40 40 40) else copy aoOptions.occludedColor)
+		return (if (aoOptions == undefined) then (color 140 140 140) else copy aoOptions.occludedColor)
 	)
 
 	fn overrideSelectedAOColor = (
