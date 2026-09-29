@@ -12,3 +12,4 @@
 !/maxpkg-changelog.ini
 /dist/
 /CHANGELOG-*.md
+/.texture-override-test/

@@ -53,6 +53,8 @@ Script for proper conversion model to GLB=
 denoise.bat=
 vdenoise.xml=
 jpegoptim.exe=
+convert.exe=
+ImageMagick-LICENSE.txt=
 gltfpack.exe=
 gltfpack_webgl.bat=
 model-viewer.zip=
@@ -651,6 +653,20 @@ fn GCMatterportMaterialLODPrefix layerName = (
 	return ("[" + layerName + "] ")
 )
 
+fn GCMatterportGetTextureSize materialEntry = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do return 0
+	local sizePixels = GCMatterportSceneProperties.getValue ((GCMatterportAOKey materialEntry) + "textureSize") 0
+	if (findItem #(0, 128, 256, 512, 1024, 2048, 4096) sizePixels == 0) do return 0
+	return sizePixels
+)
+
+fn GCMatterportSetTextureSize materialEntry sizePixels = (
+	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do return false
+	if (findItem #(0, 128, 256, 512, 1024, 2048, 4096) sizePixels == 0) do throw "Unsupported texture size."
+	GCMatterportSceneProperties.setValue ((GCMatterportAOKey materialEntry) + "textureSize") sizePixels
+	return true
+)
+
 fn GCMatterportFormatMaterialRow materialEntry = (
 	local lodPrefix = GCMatterportMaterialLODPrefix materialEntry.layerName
 	if materialEntry.validationError != undefined do return (lodPrefix + (materialEntry.materialID as string) + ": Error: " + materialEntry.validationError)
@@ -661,6 +677,8 @@ fn GCMatterportFormatMaterialRow materialEntry = (
 	local rowText = "[" + statusGlyph + "] " + (materialEntry.materialID as string) + ": " + materialEntry.materialRef.name
 	if (GCMatterportHasAOMap materialEntry.materialRef) do rowText = "[AO] " + rowText
 	local differences = #()
+	local textureSize = GCMatterportGetTextureSize materialEntry
+	if (textureSize > 0) do append differences ("Tex " + (textureSize as string))
 	if (aoOptions != undefined) do (
 		if (aoOptions.passes != 15) do append differences ((aoOptions.passes as string) + " passes")
 		if (aoOptions.resolution != GCMatterportAutomaticAOResolution materialEntry.layerName) do append differences ((aoOptions.resolution as string) + " px")
@@ -1169,12 +1187,43 @@ fn GCMatterportPickAOSize = (
 	return sizeDialog.acceptedSize
 )
 
+fn GCMatterportOverrideTextureSize = (
+	local exporterRollout = _rExportGCMatterportGLBConverter
+	if (exporterRollout.isRenderingAO or exporterRollout.isExportingLODs) do return false
+	local selectedEntries = for rowIndex in (exporterRollout.lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= exporterRollout.materialEntries.count) collect exporterRollout.materialEntries[rowIndex]
+	if (selectedEntries.count == 0) do return false
+	for materialEntry in selectedEntries where (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "Refresh Materials and select valid materials."
+	local textureSizeDialog
+	rollout textureSizeDialog "Override Textures Size" (
+		local acceptedSize = undefined
+		dropdownList ddlSize "Maximum size:" items: #("Default (LOD)", "128", "256", "512", "1024", "2048", "4096") width: 240 align: #center
+		button btnAccept "OK" width: 110 height: 24 across: 2 align: #left offset: [0, 15]
+		button btnCancel "Cancel" width: 110 height: 24 align: #right offset: [0, 15]
+		on textureSizeDialog open do (
+			local currentEntries = _rExportGCMatterportGLBConverter.materialEntries
+			local selectedRows = _rExportGCMatterportGLBConverter.lbxMaterials.selection as array
+			if (selectedRows.count > 0) do ddlSize.selection = findItem #(0, 128, 256, 512, 1024, 2048, 4096) (GCMatterportGetTextureSize currentEntries[selectedRows[1]])
+		)
+		on btnAccept pressed do (
+			acceptedSize = #(0, 128, 256, 512, 1024, 2048, 4096)[ddlSize.selection]
+			destroyDialog textureSizeDialog
+		)
+		on btnCancel pressed do destroyDialog textureSizeDialog
+	)
+	createDialog textureSizeDialog 260 105 modal: true
+	if (textureSizeDialog.acceptedSize == undefined) do return false
+	for materialEntry in selectedEntries do GCMatterportSetTextureSize materialEntry textureSizeDialog.acceptedSize
+	exporterRollout.refreshMaterials()
+	return true
+)
+
 rcmenu GCMatterportMaterialContextMenu (
 	submenu "Preview Unwrap" (
 		menuItem previewUnwrapChannel1Item "Channel 1"
 		menuItem previewUnwrapItem "Channel 2"
 	)
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
+	menuItem overrideTextureSizeItem "Override Textures Size..."
 	separator previewSeparator
 	submenu "Use Corona AO" (
 		menuItem aoEnable "Enable"
@@ -1218,9 +1267,13 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem denoiserDisable "Disable"
 	)
 	on GCMatterportMaterialContextMenu open do (
+		overrideTextureSizeItem.enabled = (_rExportGCMatterportGLBConverter.lbxMaterials.selection.numberSet > 0 and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		previewUnwrapChannel1Item.enabled = (_rExportGCMatterportGLBConverter.selectedAOEntry() != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		previewUnwrapItem.enabled = (_rExportGCMatterportGLBConverter.selectedAOEntry() != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		renderSelectedAOItem.enabled = _rExportGCMatterportGLBConverter.btnRenderAO.enabled
+	)
+	on overrideTextureSizeItem picked do (
+		try (GCMatterportOverrideTextureSize()) catch (messageBox (getCurrentException() as string) title: "Override Textures Size" beep: false)
 	)
 	on previewUnwrapChannel1Item picked do (
 		try (GCMatterportPreviewUnwrap (_rExportGCMatterportGLBConverter.selectedAOEntry()) 1) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 1" beep: false)
@@ -1263,7 +1316,30 @@ rcmenu GCMatterportMaterialContextMenu (
 )
 
 
-struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial)
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #())
+
+fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels = (
+	local converterPath = GCMatterportRuntimeFolder + "convert.exe"
+	if (not doesFileExist converterPath) do throw "Missing ImageMagick convert.exe. Restore the converter package."
+	local resizedPNG = outputStem + ".png"
+	local opaqueReport = outputStem + ".opaque.txt"
+	local outputFolder = getFilenamePath outputStem
+	local geometrySize = (sizePixels as string) + "x" + (sizePixels as string) + ">"
+	GCMatterportRunAOProcess converterPath ("\"" + sourceImage + "[0]\" -resize \"" + geometrySize + "\" -depth 8 \"PNG32:" + resizedPNG + "\"") outputFolder operationLabel: "Texture resize"
+	GCMatterportRunAOProcess converterPath ("\"" + resizedPNG + "\" -format \"%[opaque]\" \"info:" + opaqueReport + "\"") outputFolder operationLabel: "Texture alpha check"
+	local isOpaque = (toLower (trimRight (trimLeft ((dotNetClass "System.IO.File").ReadAllText opaqueReport)))) == "true"
+	local resultImage = resizedPNG
+	if (isOpaque) do (
+		resultImage = outputStem + ".jpg"
+		GCMatterportRunAOProcess converterPath ("\"" + resizedPNG + "\" -alpha off -quality 100 \"" + resultImage + "\"") outputFolder operationLabel: "Texture JPEG conversion"
+		GCMatterportOptimizeAO resultImage
+	)
+	local imageInfo = (dotNetClass "System.Drawing.Image").FromFile resultImage
+	local validSize = (imageInfo.Width > 0 and imageInfo.Height > 0 and imageInfo.Width <= sizePixels and imageInfo.Height <= sizePixels)
+	imageInfo.Dispose()
+	if (not validSize) do throw "Texture resize exceeded the selected maximum size."
+	return resultImage
+)
 
 
 fn GCMatterportBuildExportMaterial sceneNode = (
@@ -1371,7 +1447,17 @@ fn GCMatterportExportPreflight layerNames = (
 				append issues (entryCaption + ": export requires geometry that evaluates to a non-empty mesh. Check the object and its modifiers.")
 			)
 			if (sourceMesh != undefined) do delete sourceMesh
-			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial)
+			local textureSizes = #()
+			if (validSlots and parentMaterial != undefined and classOf parentMaterial == MultiMaterial) do (
+				for slotIndex in 1 to parentMaterial.materialList.count do (
+					local sourceEntry = GCMatterportMaterialEntry layerName: layerName nodeRef: sceneNode materialRef: parentMaterial.materialList[slotIndex] slotIndex: slotIndex materialID: parentMaterial.materialIDList[slotIndex]
+					append textureSizes (GCMatterportGetTextureSize sourceEntry)
+				)
+			)
+			if ((for sizePixels in textureSizes where sizePixels > 0 collect sizePixels).count > 0) do (
+				for runtimeFile in #("convert.exe", "jpegoptim.exe") where (not doesFileExist (GCMatterportRuntimeFolder + runtimeFile)) do append issues ("Missing runtime file: " + runtimeFile)
+			)
+			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes)
 		)
 	)
 	return #(exportJobs, issues)
@@ -1415,20 +1501,27 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			local mapsFolder = stagingFolder + "maps\\"
 			makeDir mapsFolder all: true
 			GCMatterportAssertExportMaps temporaryNode.material exportJob.nodeRef.name
-			local bitmapMaps = getClassInstances Bitmaptexture target: temporaryNode.material
-			for mapIndex in 1 to bitmapMaps.count do (
-				local bitmapMap = bitmapMaps[mapIndex]
-				local sourceImage = mapPaths.getFullFilePath bitmapMap.filename
-				local copiedImage = mapsFolder + (mapIndex as string) + (getFilenameType sourceImage)
-				if (not copyFile sourceImage copiedImage) do throw ("Cannot copy the referenced texture: " + sourceImage)
-				bitmapMap.filename = copiedImage
+			local hasTextureOverrides = ((for sizePixels in exportJob.textureSizes where sizePixels > 0 collect sizePixels).count > 0)
+			local mapIndex = 0
+			for slotIndex in 1 to temporaryNode.material.materialList.count do (
+				local sizePixels = if (slotIndex <= exportJob.textureSizes.count and exportJob.textureSizes[slotIndex] > 0) then exportJob.textureSizes[slotIndex] else exportJob.textureLimit
+				for bitmapMap in (getClassInstances Bitmaptexture target: temporaryNode.material.materialList[slotIndex]) do (
+					mapIndex += 1
+					local sourceImage = mapPaths.getFullFilePath bitmapMap.filename
+					local copiedImage = mapsFolder + (mapIndex as string) + "_source" + (getFilenameType sourceImage)
+					if (not copyFile sourceImage copiedImage) do throw ("Cannot copy the referenced texture: " + sourceImage)
+					if (hasTextureOverrides) do copiedImage = GCMatterportResizeExportTexture copiedImage (mapsFolder + (mapIndex as string)) sizePixels
+					bitmapMap.filename = copiedImage
+				)
 			)
 			select temporaryNode
 			local intermediateGLTF = stagingFolder + "scene.gltf"
 			if (not exportFile intermediateGLTF #noPrompt selectedOnly: true using: GLTF_Export) do throw "Native glTF export failed or was cancelled."
 			if (not doesFileExist intermediateGLTF) do throw "Native glTF export produced no file."
 			local batchPath = GCMatterportRuntimeFolder + "gltfpack_webgl.bat"
-			local commandLine = "/d /v:off /s /c \"\"" + batchPath + "\" \"" + intermediateGLTF + ";" + stagedGLB + ";" + (exportJob.textureLimit as string) + "\"\""
+			-- Per-material caps have already been applied; do not clamp overrides back to the LOD cap.
+			local packTextureLimit = if hasTextureOverrides then 4096 else exportJob.textureLimit
+			local commandLine = "/d /v:off /s /c \"\"" + batchPath + "\" \"" + intermediateGLTF + ";" + stagedGLB + ";" + (packTextureLimit as string) + "\"\""
 			local commandExecutable = (dotNetClass "System.Environment").SystemDirectory + "\\cmd.exe"
 			GCMatterportRunAOProcess commandExecutable commandLine GCMatterportRuntimeFolder operationLabel: "WebGL export"
 		)
@@ -2456,7 +2549,7 @@ rollout GCMatterportLiveRollout "Live Preview Materials" (
 
 
 struct GCMatterportAOClipboardEntry (
-	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution, occludedColor = color 140 140 140
+	materialID, useCoronaAO, passes, sizeCM, useVRayDenoiser, customResolution, manualResolution, occludedColor = color 140 140 140, textureSize = 0
 )
 global GCMatterportAOClipboard
 
@@ -3344,7 +3437,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		for materialEntry in entries do (
 			local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 			-- Copy color by value; no node/material/option references or computed resolution.
-			append clipboardEntries (GCMatterportAOClipboardEntry materialID: materialEntry.materialID useCoronaAO: aoOptions.useCoronaAO passes: aoOptions.passes sizeCM: aoOptions.sizeCM useVRayDenoiser: aoOptions.useVRayDenoiser customResolution: aoOptions.customResolution manualResolution: aoOptions.manualResolution occludedColor: (copy aoOptions.occludedColor))
+			append clipboardEntries (GCMatterportAOClipboardEntry materialID: materialEntry.materialID useCoronaAO: aoOptions.useCoronaAO passes: aoOptions.passes sizeCM: aoOptions.sizeCM useVRayDenoiser: aoOptions.useVRayDenoiser customResolution: aoOptions.customResolution manualResolution: aoOptions.manualResolution occludedColor: (copy aoOptions.occludedColor) textureSize: (GCMatterportGetTextureSize materialEntry))
 		)
 		GCMatterportAOClipboard = clipboardEntries
 		return true
@@ -3378,7 +3471,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 						if (isProperty sourceSettings #occludedColor) do aoOptions.occludedColor = copy sourceSettings.occludedColor
 						-- Save writes the target node/ID key; auto resolution is recomputed for its LOD.
 						try (
-							if (GCMatterportSaveAOOptions materialEntry aoOptions) then pastedCount += 1 else append reportLines (entryCaption + ": skipped; the material assignment changed.")
+							if (GCMatterportSaveAOOptions materialEntry aoOptions) then (
+								if (isProperty sourceSettings #textureSize) do GCMatterportSetTextureSize materialEntry sourceSettings.textureSize
+								pastedCount += 1
+							) else append reportLines (entryCaption + ": skipped; the material assignment changed.")
 						) catch (
 							append reportLines (entryCaption + ": could not save AO settings. " + (getCurrentException() as string))
 						)
