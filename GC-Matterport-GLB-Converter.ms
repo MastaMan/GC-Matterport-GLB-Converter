@@ -55,6 +55,11 @@ vdenoise.xml=
 jpegoptim.exe=
 convert.exe=
 ImageMagick-LICENSE.txt=
+gltf_validator.exe=
+glTF-Validator-LICENSE.txt=
+glTF-Validator-NOTICES.txt=
+GC-GLB-Validation.cs=
+GC-GLB-Validation.exe=
 gltfpack.exe=
 gltfpack_webgl.bat=
 model-viewer.zip=
@@ -1316,7 +1321,7 @@ rcmenu GCMatterportMaterialContextMenu (
 )
 
 
-struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #())
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), validationFolder, validationSummary)
 
 fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels = (
 	local converterPath = GCMatterportRuntimeFolder + "convert.exe"
@@ -1363,7 +1368,7 @@ fn GCMatterportExportPreflight layerNames = (
 	local issues = #()
 	if (maxFilePath == "" or maxFileName == "") do append issues "Save the MAX scene first. Output belongs in the scene's export folder."
 	if (GLTF_Export == undefined or (findItem exporterPlugin.classes GLTF_Export) == 0) do append issues "The native glTF exporter is unavailable. Install or enable the 3ds Max glTF exporter."
-	for fileName in #("gltfpack.exe", "gltfpack_webgl.bat") where (not doesFileExist (GCMatterportRuntimeFolder + fileName)) do append issues ("Missing runtime file: " + fileName + ". Restore it beside the converter script.")
+	for fileName in #("gltfpack.exe", "gltfpack_webgl.bat", "gltf_validator.exe", "GC-GLB-Validation.exe") where (not doesFileExist (GCMatterportRuntimeFolder + fileName)) do append issues ("Missing runtime file: " + fileName + ". Restore it beside the converter script.")
 	for folderPath in #(maxFilePath, GCMatterportRuntimeFolder) do (
 		for forbiddenPart in #("%", ";", "\r", "\n") where (findString folderPath forbiddenPart != undefined) do append issues "The WebGL batch pipeline requires scene/script paths without %, semicolons or line breaks."
 	)
@@ -1463,9 +1468,16 @@ fn GCMatterportExportPreflight layerNames = (
 	return #(exportJobs, issues)
 )
 
-fn GCMatterportValidateGLB filePath = (
+fn GCMatterportValidateGLB filePath reportFolder = (
 	if (not doesFileExist filePath or getFileSize filePath <= 0) do throw "WebGL packing did not produce a non-empty GLB file."
-	return true
+	local helperPath = GCMatterportRuntimeFolder + "GC-GLB-Validation.exe"
+	local argumentsContent = "validate \"" + filePath + "\" \"" + (trimRight reportFolder "\\") + "\""
+	GCMatterportRunAOProcess helperPath argumentsContent GCMatterportRuntimeFolder operationLabel: "GLB validation"
+	local summaryPath = reportFolder + (filenameFromPath filePath) + ".summary.txt"
+	if (not doesFileExist summaryPath) do throw "The validator produced no summary."
+	local summaryLines = (dotNetClass "System.IO.File").ReadAllLines summaryPath
+	if (summaryLines.count != 2) do throw "The validation summary is incomplete."
+	return ("Errors: " + summaryLines[1] + ". Warnings: " + summaryLines[2] + ".")
 )
 
 fn GCMatterportExportOneLOD exportJob exportFolder = (
@@ -1525,7 +1537,8 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			local commandExecutable = (dotNetClass "System.Environment").SystemDirectory + "\\cmd.exe"
 			GCMatterportRunAOProcess commandExecutable commandLine GCMatterportRuntimeFolder operationLabel: "WebGL export"
 		)
-		GCMatterportValidateGLB stagedGLB
+		if (exportJob.validationFolder == undefined) do exportJob.validationFolder = exportFolder + "validation\\" + runToken + "\\"
+		exportJob.validationSummary = GCMatterportValidateGLB stagedGLB exportJob.validationFolder
 		-- Publish only a validated GLB. A failed export never deletes an existing result.
 		if (doesFileExist finalGLB) then (
 			(dotNetClass "System.IO.File").Replace stagedGLB finalGLB (stagingFolder + "previous.glb")
@@ -2783,6 +2796,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
 
 	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
+	checkbox cbxShowValidationReport "Show validation report" checked: true width: 310 align: #center toolTip: "Open the Khronos validation report after export. GLB validation always runs."
 
 	local isExportingLODs = false
 	local isRenderingAO = false
@@ -3200,6 +3214,20 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		)
 		local exportJobs = preflightResult[1]
 		local exportFolder = maxFilePath + "export\\"
+		local validationFolder = exportFolder + "validation\\" + ((dotNetClass "System.DateTime").Now.ToString "yyyyMMdd-HHmmss") + "-" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
+		local validationFiles = ""
+		for exportJob in exportJobs do (
+			exportJob.validationFolder = validationFolder
+			validationFiles += exportJob.fileName + "\n"
+		)
+		try (
+			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("clean \"" + exportFolder + "validation\"") GCMatterportRuntimeFolder operationLabel: "Previous validation report cleanup"
+			(dotNetClass "System.IO.Directory").CreateDirectory validationFolder
+			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "files.txt") validationFiles (dotNetObject "System.Text.UTF8Encoding" false)
+		) catch (
+			messageBox ("Could not create the validation report folder.\n" + (getCurrentException() as string)) title: "Batch Export LODs" beep: false
+			return false
+		)
 		local completedCount = 0
 		local reportLines = #()
 		local previousTimerActive = tmrLODRefresh.active
@@ -3236,6 +3264,14 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		)
 		if (completedCount > 0) do summaryText += "\n\nOutput: " + exportFolder
 		for reportLine in reportLines do summaryText += "\n" + reportLine
+		for exportJob in exportJobs where (exportJob.validationSummary != undefined) do summaryText += "\n" + exportJob.fileName + ": " + exportJob.validationSummary
+		try (
+			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") summaryText (dotNetObject "System.Text.UTF8Encoding" false)
+			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
+			if (cbxShowValidationReport.checked) do ShellLaunch (validationFolder + "index.html") ""
+		) catch (
+			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
+		)
 		if (completedCount > 0) then (
 			if (queryBox (summaryText + "\n\nOpen this folder?") title: "Batch Export LODs" beep: false defaultButton: 2) do (
 				try (

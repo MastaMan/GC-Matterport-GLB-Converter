@@ -13,3 +13,4 @@
 /dist/
 /CHANGELOG-*.md
 /.texture-override-test/
+/.validator-test/
