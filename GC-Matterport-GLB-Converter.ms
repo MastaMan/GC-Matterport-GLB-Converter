@@ -972,7 +972,6 @@ fn GCMatterportConfirmTyped messageContent expectedText: "OK" = (
 global _rExportGCMatterportGLBConverter
 
 
-global GCMatterportMaterialContextEntry
 
 fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
 	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The object or material assignment changed. Refresh Materials and select the ID again."
@@ -1060,11 +1059,11 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem denoiserDisable "Disable"
 	)
 	on GCMatterportMaterialContextMenu open do (
-		previewUnwrapItem.enabled = (GCMatterportMaterialContextEntry != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
+		previewUnwrapItem.enabled = (_rExportGCMatterportGLBConverter.selectedAOEntry() != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		renderSelectedAOItem.enabled = _rExportGCMatterportGLBConverter.btnRenderAO.enabled
 	)
 	on previewUnwrapItem picked do (
-		try (GCMatterportPreviewUnwrapChannel2 GCMatterportMaterialContextEntry) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 2" beep: false)
+		try (GCMatterportPreviewUnwrapChannel2 (_rExportGCMatterportGLBConverter.selectedAOEntry())) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 2" beep: false)
 	)
 	on renderSelectedAOItem picked do _rExportGCMatterportGLBConverter.renderSelectedAO()
 	on aoEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled true
@@ -2778,13 +2777,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		if (selectedRows.count == 0) do return false
 		local wasTimerActive = tmrLODRefresh.active
 		tmrLODRefresh.active = false
-		GCMatterportMaterialContextEntry = undefined
 		try (
 			refreshAOSettings()
-			if (selectedRows.count == 1) do GCMatterportMaterialContextEntry = materialEntries[selectedRows[1]]
 			popUpMenu GCMatterportMaterialContextMenu
 		) catch (format "Materials menu: %\n" (getCurrentException()))
-		GCMatterportMaterialContextEntry = undefined
 		tmrLODRefresh.active = wasTimerActive
 	)
 
