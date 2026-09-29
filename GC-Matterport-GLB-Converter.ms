@@ -628,8 +628,18 @@ fn GCMatterportAssignAO materialEntry filePath = (
 	return GCMatterportApplyAOMap materialEntry.materialRef filePath
 )
 
+fn GCMatterportMaterialLODPrefix layerName = (
+	if (layerName == undefined) do return ""
+	if (layerName.count >= 4) do (
+		local lodSuffix = toUpper (substring layerName (layerName.count - 3) 4)
+		if (findItem #("LOD0", "LOD1", "LOD2", "LOD3") lodSuffix > 0) do return ("[LOD" + (substring lodSuffix 4 1) + "] ")
+	)
+	return ("[" + layerName + "] ")
+)
+
 fn GCMatterportFormatMaterialRow materialEntry = (
-	if materialEntry.validationError != undefined do return ((materialEntry.materialID as string) + ": Error: " + materialEntry.validationError)
+	local lodPrefix = GCMatterportMaterialLODPrefix materialEntry.layerName
+	if materialEntry.validationError != undefined do return (lodPrefix + (materialEntry.materialID as string) + ": Error: " + materialEntry.validationError)
 	local aoOptions = GCMatterportGetEffectiveAOOptions materialEntry
 	local propertyKey = GCMatterportAOKey materialEntry
 	local isEnabled = GCMatterportSceneProperties.getValue (propertyKey + "enabled") true
@@ -655,7 +665,7 @@ fn GCMatterportFormatMaterialRow materialEntry = (
 		)
 		rowText += "]"
 	)
-	return rowText
+	return (lodPrefix + rowText)
 )
 
 fn GCMatterportUVChannelsMatch sourceMesh sourceChannel resultMesh resultChannel = (
@@ -788,7 +798,7 @@ fn GCMatterportGetMaterials selectedLayerNames = (
 		for sceneNode in layerNodes do (
 			local parentMaterial = sceneNode.material
 			if (parentMaterial == undefined or classOf parentMaterial != MultiMaterial) then (
-				append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "Multi/Sub-Object required" displayText: (sceneNode.name + " - Error: Multi/Sub-Object required"))
+				append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "Multi/Sub-Object required" displayText: ((GCMatterportMaterialLODPrefix selectedLayerName) + sceneNode.name + " - Error: Multi/Sub-Object required"))
 			) else (
 				local allIDs = #()
 				for materialID in parentMaterial.materialIDList do appendIfUnique allIDs materialID
@@ -805,7 +815,7 @@ fn GCMatterportGetMaterials selectedLayerNames = (
 					materialEntry.displayText = GCMatterportFormatMaterialRow materialEntry
 					append materialEntries materialEntry
 				)
-				if allIDs.count == 0 do append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "empty Multi/Sub-Object" displayText: (sceneNode.name + " - Error: empty Multi/Sub-Object"))
+				if allIDs.count == 0 do append materialEntries (GCMatterportMaterialEntry layerName: selectedLayerName nodeRef: sceneNode materialID: 0 slotIndex: 0 validationError: "empty Multi/Sub-Object" displayText: ((GCMatterportMaterialLODPrefix selectedLayerName) + sceneNode.name + " - Error: empty Multi/Sub-Object"))
 			)
 		)
 	)
