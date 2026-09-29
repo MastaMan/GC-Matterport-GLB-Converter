@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.2.1
+VERSION = 1.3.0
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,15 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.3.0]
+* Added: Preview Unwrap supports UV channels 1 and 2. =
+* Added: AO baking summaries show total elapsed seconds. =
+* Added: Google and PlayCanvas previews can center the model without changing zoom or viewing angle. =
+* Improved: Preview toolbar buttons use consistent sizing and Lucide icons. =
+* Added: Override Textures Size limits all maps of selected materials before GLB packing, with scene persistence and a Default reset. =
+* Added: Automatic Khronos GLB validation with a status dashboard, statistics and detailed logs. =
+* Added: Optional report display after export, enabled by default; only the latest validation report is retained. =
 
 [1.2.1]
 * Changed: Google and PlayCanvas screenshots are saved in the scene's export folder. =
