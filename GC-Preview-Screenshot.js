@@ -6,11 +6,66 @@
   const style = document.createElement('style');
   style.textContent = '#gc-screenshot-controls{position:fixed;right:16px;top:12px;z-index:100000;font:13px Arial;color:#fff}#gc-screenshot-controls button,#gc-screenshot-controls select,#gc-screenshot-controls input{font:inherit;padding:8px;border:1px solid #777;border-radius:5px;background:#252525;color:#fff}#gc-screenshot-controls [hidden]{display:none!important}#gc-screenshot-controls button{cursor:pointer;display:inline-block;width:auto}#gc-screenshot-controls button:disabled{opacity:.5}#gc-screenshot-menu{position:absolute;right:0;top:42px;width:220px;padding:12px;background:#252525;border:1px solid #777;border-radius:6px}#gc-screenshot-menu label{display:block;margin:5px 0 9px}#gc-screenshot-status{max-width:410px;margin-top:8px;padding:8px;background:#252525e8;border-radius:5px;overflow-wrap:anywhere}#gc-screenshot-blocker{position:fixed;inset:0;z-index:99999;background:#0002;cursor:wait}';
   document.head.append(style);
+  style.textContent += '#gc-screenshot-controls>button{box-sizing:border-box;height:38px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle}';
   const ui = document.createElement('div'); ui.id = 'gc-screenshot-controls';
   ui.innerHTML = '<button id="gc-take-shot" type="button">Take Screenshot</button> <button id="gc-shot-settings" type="button" aria-label="Screenshot Settings" title="Screenshot Settings">⚙</button><div id="gc-screenshot-menu" hidden><label>Square PNG</label><select id="gc-shot-size"><option value="512">512 × 512</option><option value="1024">1024 × 1024</option><option value="2048" selected>2048 × 2048</option><option value="4096">4096 × 4096</option><option value="custom">Custom size...</option></select><label id="gc-custom-row" hidden>Side, pixels <input id="gc-custom-size" type="number" min="128" max="10000" step="1" value="4096" style="width:100px"></label><p>Keeps the camera view. Renders a square frame.</p></div><div id="gc-screenshot-status" role="status" hidden></div>';
   document.body.append(ui);
   const get = id => document.getElementById(id);
+  // Lucide Focus and Settings icons, https://lucide.dev (ISC).
+  // Copyright (c) 2026 Lucide Icons and Contributors.
+  // Permission to use, copy, modify, and/or distribute this software for any
+  // purpose with or without fee is hereby granted, provided that the above
+  // copyright notice and this permission notice appear in all copies.
+  // THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  // WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  // MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  // ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  // WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  const centerButton = document.createElement('button');
+  centerButton.id = 'gc-center-model'; centerButton.type = 'button';
+  centerButton.title = 'Center Model'; centerButton.setAttribute('aria-label', 'Center Model');
+  centerButton.style.cssText = 'vertical-align:middle;margin-right:6px;padding:6px';
+  centerButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>';
+  ui.prepend(centerButton);
+  const settingsButton = get('gc-shot-settings');
+  settingsButton.style.padding = '6px';
+  settingsButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:block"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>';
+  async function centerModel() {
+    if (active) return;
+    centerButton.disabled = true;
+    try {
+      const element = document.querySelector('model-viewer');
+      if (element) {
+        if (!element.loaded) throw new Error('Wait for the model to finish loading.');
+        const orbit = element.getCameraOrbit();
+        element.cameraTarget = 'auto auto auto';
+        element.cameraOrbit = `${orbit.theta}rad ${orbit.phi}rad ${orbit.radius}m`;
+        // Panning and zooming do not change the public property strings.
+        // Reapply them even if the user presses Center more than once.
+        element.requestUpdate('cameraTarget');
+        element.requestUpdate('cameraOrbit');
+        await element.updateComplete;
+        element.jumpCameraToGoal();
+      } else {
+        const viewer = window.viewer;
+        if (!viewer?.entities?.length || viewer.firstFrame) throw new Error('Wait for the model to finish loading.');
+        if (viewer.xrMode?.active) throw new Error('Exit AR to center the model.');
+        if (viewer.activeSceneCamera) throw new Error('Select the orbit camera to center the model.');
+        const distance = viewer.cameraControls._pose?.distance;
+        if (!Number.isFinite(distance) || distance <= 0) throw new Error('The camera is not ready.');
+        const bounds = viewer.sceneBounds.clone();
+        viewer.calcSceneBounds(bounds);
+        const target = bounds.center.clone();
+        const position = viewer.camera.forward.clone().mulScalar(-distance).add(target);
+        viewer.cameraControls.reset(target, position);
+        viewer.renderNextFrame();
+      }
+    } finally { centerButton.disabled = active; }
+  }
   const status = (text, error=false) => { const box=get('gc-screenshot-status'); box.hidden=false; box.textContent=text; box.style.color=error?'#ffb4a9':'#fff'; };
+  centerButton.onclick = () => centerModel().catch(error => status(error.message, true));
   get('gc-shot-settings').onclick=()=>{get('gc-screenshot-menu').hidden=!get('gc-screenshot-menu').hidden;};
   get('gc-shot-size').onchange=()=>{get('gc-custom-row').hidden=get('gc-shot-size').value!=='custom';};
   document.addEventListener('keydown', event=>{if(event.key==='Escape' && active) cancelled=true;});
@@ -172,7 +227,7 @@
     if(!Number.isInteger(size) || size<128 || size>10000) throw new Error('Enter an integer side length from 128 to 10000 pixels.');
     active=true; cancelled=false;
     const blocker=document.createElement('div'); blocker.id='gc-screenshot-blocker'; document.body.append(blocker);
-    get('gc-take-shot').disabled=get('gc-shot-settings').disabled=true; get('gc-screenshot-menu').hidden=true;
+    centerButton.disabled=get('gc-take-shot').disabled=get('gc-shot-settings').disabled=true; get('gc-screenshot-menu').hidden=true;
     let adapter=null, captureId=null;
     try {
       const config=await api('config');
@@ -198,7 +253,7 @@
       if(captureId) {try {await api('cancel','',{'X-GC-Capture':captureId});} catch(error) {console.warn(error);}}
       try {adapter?.restore();} finally {
         blocker.remove();active=false;
-        get('gc-take-shot').disabled=get('gc-shot-settings').disabled=false;
+        centerButton.disabled=get('gc-take-shot').disabled=get('gc-shot-settings').disabled=false;
       }
     }
   }
