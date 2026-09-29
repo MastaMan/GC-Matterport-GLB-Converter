@@ -1022,6 +1022,24 @@ fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
 	return true
 )
 
+fn GCMatterportPickAOColor = (
+	local colorDialog
+	rollout colorDialog "Override Color" (
+		local acceptedColor = undefined
+		colorPicker cpColor "AO color: " color: (color 40 40 40) width: 240 height: 44 align: #center
+		button btnAccept "OK" width: 110 height: 24 across: 2 align: #left offset: [0, 10]
+		button btnCancel "Cancel" width: 110 height: 24 align: #right offset: [0, 10]
+		on colorDialog open do cpColor.color = _rExportGCMatterportGLBConverter.selectedAOColor()
+		on btnAccept pressed do (
+			acceptedColor = copy cpColor.color
+			destroyDialog colorDialog
+		)
+		on btnCancel pressed do destroyDialog colorDialog
+	)
+	createDialog colorDialog 260 100 modal: true
+	return colorDialog.acceptedColor
+)
+
 rcmenu GCMatterportMaterialContextMenu (
 	menuItem previewUnwrapItem "Preview Unwrap Channel 2"
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
@@ -1047,6 +1065,7 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem resolution2048 "2048"
 		menuItem resolution4096 "4096"
 	)
+	menuItem overrideColorItem "Override Color..."
 	submenu "Size (cm)" (
 		menuItem size5 "5"
 		menuItem size15 "15"
@@ -1065,6 +1084,7 @@ rcmenu GCMatterportMaterialContextMenu (
 	on previewUnwrapItem picked do (
 		try (GCMatterportPreviewUnwrapChannel2 (_rExportGCMatterportGLBConverter.selectedAOEntry())) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 2" beep: false)
 	)
+	on overrideColorItem picked do _rExportGCMatterportGLBConverter.overrideSelectedAOColor()
 	on renderSelectedAOItem picked do _rExportGCMatterportGLBConverter.renderSelectedAO()
 	on aoEnable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled true
 	on aoDisable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled false
@@ -2757,6 +2777,11 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 							GCMatterportSceneProperties.setValue (propertyKey + "override") true
 							GCMatterportSceneProperties.setValue (propertyKey + "manualResolution") settingValue
 						)
+						#occludedColor: (
+							GCMatterportSceneProperties.setValue (propertyKey + "occludedColorR") settingValue.r
+							GCMatterportSceneProperties.setValue (propertyKey + "occludedColorG") settingValue.g
+							GCMatterportSceneProperties.setValue (propertyKey + "occludedColorB") settingValue.b
+						)
 						#passes: GCMatterportSceneProperties.setValue (propertyKey + "passes") settingValue
 						#sizeCM: GCMatterportSceneProperties.setValue (propertyKey + "sizeCM") settingValue
 						#denoise: GCMatterportSceneProperties.setValue (propertyKey + "denoise") settingValue
@@ -2769,6 +2794,28 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		refreshLODs()
 		if (failures.count > 0) do messageBox "Some material assignments changed. Those entries were skipped; select them again." title: "Materials" beep: false
 		return (failures.count == 0)
+	)
+
+	fn selectedAOColor = (
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return (color 40 40 40)
+		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntries[selectedRows[1]]
+		return (if (aoOptions == undefined) then (color 40 40 40) else copy aoOptions.occludedColor)
+	)
+
+	fn overrideSelectedAOColor = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return false
+		local wasTimerActive = tmrLODRefresh.active
+		local didSave = false
+		tmrLODRefresh.active = false
+		try (
+			local selectedColor = GCMatterportPickAOColor()
+			if (selectedColor != undefined) do didSave = batchAOSetting #occludedColor selectedColor
+		) catch (messageBox (getCurrentException() as string) title: "Override Color" beep: false)
+		tmrLODRefresh.active = wasTimerActive
+		return didSave
 	)
 
 	on lbxMaterials rightClick do (
