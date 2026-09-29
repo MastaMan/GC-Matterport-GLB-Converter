@@ -3487,7 +3487,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 						unwrapModifier.unwrap.breakSelected()
 						unwrapModifier.unwrap6.selectFacesByNode selectedFaces targetNode
 						-- Pack Custom is exposed as unwrap2.pack in Max 2027; no packCustom method exists.
-						unwrapModifier.unwrap2.pack 3 0.004 true true true
+						unwrapModifier.unwrap2.pack 3 0.004 true false true
 					)
 					unwrapModifier.unwrap6.selectFacesByNode #{} targetNode
 					operationStage = "Validate packed channel 2 bounds"
