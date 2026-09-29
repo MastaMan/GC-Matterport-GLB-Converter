@@ -682,21 +682,78 @@ fn GCMatterportUVChannelsMatch sourceMesh sourceChannel resultMesh resultChannel
 	return true
 )
 
-fn GCMatterportValidatePackedUVs sourceMesh resultMesh selectedIDs = (
-	if (not GCMatterportUVChannelsMatch sourceMesh 1 resultMesh 1) do return "Source UV channel 1 changed."
+fn GCMatterportCopySelectedUVs targetNode sourceMesh selectedIDs = (
+ local transferNode = undefined
+ local preparedMesh = undefined
+ local copiedMesh = undefined
+ local failureReason = undefined
+ try (
+  -- Preserve the evaluated polygon layout: a triangulated donor cannot be pasted onto polygon faces.
+  transferNode = copy targetNode
+  transferNode.name = uniqueName "GC_UVTransfer_Temporary"
+  hide transferNode
+  collapseStack transferNode
+  local isPoly = (classOf transferNode == Editable_Poly)
+  if (not isPoly) do convertToMesh transferNode
+  local mapAPI = if isPoly then polyop else meshop
+  local faceCount = if isPoly then polyop.getNumFaces transferNode else getNumFaces transferNode
+  local hasTargetUVs = (mapAPI.getNumMaps transferNode > 2 and mapAPI.getMapSupport transferNode 2)
+  local baseChannel = if hasTargetUVs then 2 else 1
+  local baseVertices = for vertexIndex in 1 to (mapAPI.getNumMapVerts transferNode baseChannel) collect (mapAPI.getMapVert transferNode baseChannel vertexIndex)
+  local incomingVertices = for vertexIndex in 1 to (mapAPI.getNumMapVerts transferNode 1) collect (mapAPI.getMapVert transferNode 1 vertexIndex)
+  local preparedFaces = #()
+  for faceIndex in 1 to faceCount do (
+   local materialID = if isPoly then polyop.getFaceMatID transferNode faceIndex else getFaceMatID transferNode faceIndex
+   local isSelected = (findItem selectedIDs materialID > 0)
+   local mapFace = mapAPI.getMapFace transferNode (if isSelected then 1 else baseChannel) faceIndex
+   if isSelected do (
+    if isPoly then (
+     for cornerIndex in 1 to mapFace.count do mapFace[cornerIndex] += baseVertices.count
+    ) else mapFace += [baseVertices.count, baseVertices.count, baseVertices.count]
+   )
+   append preparedFaces mapFace
+  )
+  if (mapAPI.getNumMaps transferNode < 3) do mapAPI.setNumMaps transferNode 3 keep: true
+  mapAPI.setMapSupport transferNode 2 true
+  mapAPI.setNumMapVerts transferNode 2 (baseVertices.count + incomingVertices.count) keep: false
+  if (not isPoly) do meshop.setNumMapFaces transferNode 2 faceCount keep: false
+  for vertexIndex in 1 to baseVertices.count do mapAPI.setMapVert transferNode 2 vertexIndex baseVertices[vertexIndex]
+  for vertexIndex in 1 to incomingVertices.count do mapAPI.setMapVert transferNode 2 (baseVertices.count + vertexIndex) incomingVertices[vertexIndex]
+  for faceIndex in 1 to faceCount do mapAPI.setMapFace transferNode 2 faceIndex preparedFaces[faceIndex]
+  update transferNode
+  preparedMesh = snapshotAsMesh transferNode
+  ChannelInfo.CopyChannel transferNode 3 2
+  ChannelInfo.PasteChannel targetNode 3 2
+  copiedMesh = snapshotAsMesh targetNode
+  if (not GCMatterportUVChannelsMatch preparedMesh 2 copiedMesh 2) do throw "Selected UV transfer did not match the prepared channel."
+ ) catch (failureReason = getCurrentException() as string)
+ if copiedMesh != undefined do delete copiedMesh
+ if preparedMesh != undefined do delete preparedMesh
+ if isValidNode transferNode do delete transferNode
+ if failureReason != undefined do throw failureReason
+ return true
+)
+
+fn GCMatterportValidatePackedUVs sourceMesh resultMesh selectedIDs untouchedChannel: 1 = (
+	if (sourceMesh.numfaces != resultMesh.numfaces) do return "Face count changed."
+	if (meshop.getMapSupport sourceMesh 1 or meshop.getMapSupport resultMesh 1) do (
+		if (not GCMatterportUVChannelsMatch sourceMesh 1 resultMesh 1) do return "Source UV channel 1 changed."
+	)
 	if (not meshop.getMapSupport resultMesh 2) do return "Result UV channel 2 is missing."
 	local uvBounds = for materialID in selectedIDs collect #(1e9, 1e9, -1e9, -1e9, 0)
 	for faceIndex in 1 to resultMesh.numfaces do (
 		local materialID = getFaceMatID resultMesh faceIndex
 		if (getFaceMatID sourceMesh faceIndex != materialID) do return "Face material IDs changed."
 		local idIndex = findItem selectedIDs materialID
-		local sourceFace = meshop.getMapFace sourceMesh 1 faceIndex
 		local resultFace = meshop.getMapFace resultMesh 2 faceIndex
 		for cornerIndex in 1 to 3 do (
 			local resultUV = meshop.getMapVert resultMesh 2 resultFace[cornerIndex]
 			if (idIndex == 0) then (
-				local sourceUV = meshop.getMapVert sourceMesh 1 sourceFace[cornerIndex]
-				if (distance sourceUV resultUV > 0.00001) do return "An unselected material ID was repacked."
+				if (meshop.getNumMaps sourceMesh > untouchedChannel and meshop.getMapSupport sourceMesh untouchedChannel) do (
+					local sourceFace = meshop.getMapFace sourceMesh untouchedChannel faceIndex
+					local sourceUV = meshop.getMapVert sourceMesh untouchedChannel sourceFace[cornerIndex]
+					if (distance sourceUV resultUV > 0.00001) do return "An unselected material ID was repacked."
+				)
 			) else (
 				local idBounds = uvBounds[idIndex]
 				idBounds[1] = amin idBounds[1] resultUV.x
@@ -2573,8 +2630,9 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	
 	group "Materials" (
 		multiListbox lbxMaterials "" items: #() height: 6 offset: [-2, 0] width: 326
-		button btnSelectAllMaterials "Select All" width: 70 across: 2 enabled: false align: #left
-		button btnTransferUV "Transfer All IDs: Channel 1 -> 2" width: 242 align: #right
+		button btnSelectAllMaterials "Select All" width: 60 across: 3 enabled: false align: #left
+		button btnTransferUV "Transfer IDs Ch: 1 -> 2" width: 150 align: #center toolTip: "Transfer selected material IDs from channel 1 to channel 2 and pack"
+		button btnFlattenUV "Flatten Ch: 2" width: 98 align: #right toolTip: "Flatten and pack channel 2 for the selected material IDs"
 	)
 
 	group "Corona AO Settings" (
@@ -2953,7 +3011,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local previousTimerActive = tmrLODRefresh.active
 		local originalLODSelection = lbxLODs.selection
 		local originalMaterialSelection = lbxMaterials.selection
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, btnFlattenUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isRenderingAO = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -3016,7 +3074,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local reportLines = #()
 		local previousTimerActive = tmrLODRefresh.active
-		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
+		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, btnFlattenUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isExportingLODs = true
 		tmrLODRefresh.active = false
 		refreshAOSettings()
@@ -3408,25 +3466,25 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on btnAddToLOD pressed do addSelectedObjectToLOD()
 
 
-	fn transferAllMaterialUVs showSummary: true = (
+	local lastUVOperationReport = ""
+	fn transferAllMaterialUVs showSummary: true flattenChannel: false = (
+		local operationTitle = if flattenChannel then "Flatten Channel 2" else "Transfer Selected IDs"
 		if (isRenderingAO or isExportingLODs) do return false
-		local selectedRows = lbxLODs.selection as array
-		if (selectedRows.count == 0) do (
-			messageBox "Select one or more target LODs." title: "Transfer All IDs" beep: false
+		local targetNodes = #()
+		local selectedEntries = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect materialEntries[rowIndex]
+		if (selectedEntries.count == 0) do (
+			messageBox "Select one or more material IDs." title: operationTitle beep: false
 			return false
 		)
-		local targetNodes = #()
-		for rowIndex in selectedRows do (
-			if (rowIndex < 1 or rowIndex > lodEntries.count) do throw "The LOD list is out of date. Refresh it."
-			local lodLayer = LayerManager.getLayerFromName lodEntries[rowIndex].layerName
-			local layerNodes = #()
-			if (lodLayer != undefined) do lodLayer.nodes &layerNodes
-			if (layerNodes.count != 1 or not isValidNode layerNodes[1]) do (
-				messageBox "Each selected LOD must contain exactly one object." title: "Transfer All IDs" beep: false
+		for materialEntry in selectedEntries do (
+			if (not GCMatterportIsCurrentMaterialEntry materialEntry) do (
+				messageBox "A selected material assignment changed. Refresh Materials and select the IDs again." title: operationTitle beep: false
 				return false
 			)
-			appendIfUnique targetNodes layerNodes[1]
+			appendIfUnique targetNodes materialEntry.nodeRef
 		)
+		local operationTimer = (dotNetClass "System.Diagnostics.Stopwatch").StartNew()
+		local originalMaterialSelection = lbxMaterials.selection
 		local previousSelection = selection as array
 		local previousPanelMode = getCommandPanelTaskMode()
 		local previousStackObject = modPanel.getCurrentObject()
@@ -3437,7 +3495,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local completedCount = 0
 		local completedNodes = #()
 		tmrLODRefresh.active = false
-		undo "Transfer UV 1 to 2 and pack all material IDs" on (
+		with redraw off undo "Prepare channel 2 material UVs" on (
 			for targetIndex in 1 to targetNodes.count do (
 				local targetNode = targetNodes[targetIndex]
 				local originalModifiers = for existingModifier in targetNode.modifiers collect existingModifier
@@ -3446,33 +3504,32 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 				try (
 					if (superClassOf targetNode != GeometryClass) do throw "Not a geometry object."
 					sourceMesh = snapshotAsMesh targetNode
-					if (sourceMesh.numfaces == 0 or not meshop.getMapSupport sourceMesh 1 or meshop.getNumMapVerts sourceMesh 1 == 0) do throw "UV channel 1 is missing or empty."
+					if (sourceMesh.numfaces == 0) do throw "The object has no faces."
+					if (not flattenChannel and (not meshop.getMapSupport sourceMesh 1 or meshop.getNumMapVerts sourceMesh 1 == 0)) do throw "UV channel 1 is missing or empty."
 					local validIDs = #()
 					for faceIndex in 1 to sourceMesh.numfaces do appendIfUnique validIDs (getFaceMatID sourceMesh faceIndex)
+					validIDs = for materialID in validIDs where ((for materialEntry in selectedEntries where (materialEntry.nodeRef == targetNode and materialEntry.materialID == materialID) collect materialEntry).count > 0) collect materialID
+					if (validIDs.count == 0) do throw "No faces use the selected material IDs."
 					sort validIDs
 					-- Leave lower stack editing before creating a topology-dependent modifier.
 					subObjectLevel = 0
 					setCommandPanelTaskMode mode: #create
-					operationStage = "Copy channel 1 to channel 2"
-					-- Copy once per object. Paste adds a modifier above the original stack.
-					ChannelInfo.CopyChannel targetNode 3 1
-					ChannelInfo.PasteChannel targetNode 3 2
-					-- Evaluate Paste before Unwrap initializes its local UV data.
-					local copiedMesh = snapshotAsMesh targetNode
-					local isExactCopy = GCMatterportUVChannelsMatch sourceMesh 1 copiedMesh 2
-					delete copiedMesh
-					if (not isExactCopy) do throw "Channel 2 does not match source channel 1 after paste."
+					if (not flattenChannel) do (
+						operationStage = "Copy selected IDs from channel 1 to channel 2"
+						GCMatterportCopySelectedUVs targetNode sourceMesh validIDs
+					)
 					local unwrapModifier = Unwrap_UVW()
 					unwrapModifier.name = "Material ID UV packing (channel 2)"
 					unwrapModifier.unwrap2.setAlwaysEdit false
 					unwrapModifier.unwrap.setMapChannel 2
 					operationStage = "Add channel 2 Unwrap at top of stack"
 					addModifier targetNode unwrapModifier before: 0
-					if (targetNode.modifiers[1] != unwrapModifier) do throw "Unwrap must be above the channel paste modifier."
+					if (targetNode.modifiers[1] != unwrapModifier) do throw "Unwrap must be at the top of the modifier stack."
 					select targetNode
 					setCommandPanelTaskMode mode: #modify
 					modPanel.setCurrentObject unwrapModifier
 					subObjectLevel = 3
+					unwrapModifier.unwrap6.closeEditor()
 					unwrapModifier.unwrap2.setTVSubObjectMode 3
 					unwrapModifier.unwrap2.setTVElementMode false
 					unwrapModifier.unwrap2.setEnableSoftSelection false
@@ -3482,17 +3539,23 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 						unwrapModifier.unwrap6.selectFacesByNode #{} targetNode
 						unwrapModifier.unwrap2.selectByMatID materialID
 						local selectedFaces = unwrapModifier.unwrap6.getSelectedFacesByNode targetNode
+						unwrapModifier.unwrap6.selectFacesByNode selectedFaces targetNode
 						if (selectedFaces.numberSet == 0) do throw ("Unwrap could not select faces for ID " + (materialID as string) + ".")
 						-- Face-mode Break separates this ID at its boundary, retaining its internal islands.
 						unwrapModifier.unwrap.breakSelected()
 						unwrapModifier.unwrap6.selectFacesByNode selectedFaces targetNode
-						-- Pack Custom is exposed as unwrap2.pack in Max 2027; no packCustom method exists.
-						unwrapModifier.unwrap2.pack 3 0.004 true false true
+						if flattenChannel do (
+							operationStage = "Flatten material ID " + (materialID as string)
+							unwrapModifier.unwrap2.flattenMap 45.0 #() 0.004 true 0 false true
+							unwrapModifier.unwrap6.selectFacesByNode selectedFaces targetNode
+						)
+						-- Non-convex packing does not open Edit UVWs.
+						unwrapModifier.unwrap2.pack 2 0.004 true false true
 					)
 					unwrapModifier.unwrap6.selectFacesByNode #{} targetNode
 					operationStage = "Validate packed channel 2 bounds"
 					local packedMesh = snapshotAsMesh targetNode
-					local validationError = GCMatterportValidatePackedUVs sourceMesh packedMesh validIDs
+					local validationError = GCMatterportValidatePackedUVs sourceMesh packedMesh validIDs untouchedChannel: 2
 					delete packedMesh
 					if (validationError != undefined) do throw validationError
 					delete sourceMesh
@@ -3545,16 +3608,25 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		-- The scene selection was restored; keep the manual LOD/material selection intact.
 		lbxLODs.selection = originalLODSelection
 		refreshMaterials()
+		lbxMaterials.selection = originalMaterialSelection
+		refreshAOSettings()
 		tmrLODRefresh.active = previousTimerActive
 		redrawViews()
-		local resultMessage = "UV channel 1 copied to 2, all IDs packed, and converted to Editable Poly on " + (completedCount as string) + " object(s)."
+		local resultMessage = (if flattenChannel then "Selected material IDs flattened and packed in UV channel 2, and converted to Editable Poly on " else "Selected material IDs copied from channel 1 to 2, packed, and converted to Editable Poly on ") + (completedCount as string) + " object(s)."
+		operationTimer.Stop()
+		resultMessage += "\nElapsed: " + (formattedPrint (operationTimer.Elapsed.TotalSeconds as float) format: ".1f") + " sec."
 		for reportLine in reportLines do resultMessage += "\n" + reportLine
-		if showSummary do messageBox resultMessage title: "Transfer All IDs" beep: false
+		lastUVOperationReport = resultMessage
+		if showSummary do messageBox resultMessage title: operationTitle beep: false
 		return (reportLines.count == 0)
 	)
 
 	on btnTransferUV pressed do (
-		if (queryBox "Transfer UV Channel 1 to Channel 2 for all material IDs?\n\nThis operation may take some time. Please wait until it finishes and do not interact with 3ds Max." title: "Transfer All IDs" beep: false defaultButton: 2) do transferAllMaterialUVs()
+		if (queryBox "Transfer UV Channel 1 to Channel 2 for the selected material IDs?\n\nThis operation may take some time. Please wait until it finishes and do not interact with 3ds Max." title: "Transfer Selected IDs" beep: false defaultButton: 2) do transferAllMaterialUVs()
+	)
+
+	on btnFlattenUV pressed do (
+		if (queryBox "Flatten and pack UV Channel 2 for the selected material IDs?\n\nThis replaces their channel 2 UVs and converts the result to Editable Poly. Please wait until it finishes." title: "Flatten Channel 2" beep: false defaultButton: 2) do transferAllMaterialUVs flattenChannel: true
 	)
 
 	fn openMaterialInSlate rowIndex = (
@@ -3690,6 +3762,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on _rExportGCMatterportGLBConverter open do (
 		lblCompleteStatus.text = "Complete status: [GLB] [AO] [" + (dotNetClass "System.Char").ConvertFromUtf32 10003 + "]"
 		-- Spinner.pos is its arrow position, not the start of its caption.
+		-- Keep fixed-width material actions separated inside the narrow rollout.
+		btnTransferUV.pos = btnSelectAllMaterials.pos + [66, 0]
 		local passesPosition = spnAOPasses.pos
 		spnAOSize.pos = passesPosition + [113, 0]
 		cbxAODenoise.pos = [225, passesPosition.y]
