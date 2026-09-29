@@ -1040,6 +1040,24 @@ fn GCMatterportPickAOColor = (
 	return colorDialog.acceptedColor
 )
 
+fn GCMatterportPickAOPasses = (
+	local passesDialog
+	rollout passesDialog "Custom Passes" (
+		local acceptedPasses = undefined
+		spinner spnPasses "Passes: " range: [1, 9999, 15] type: #integer fieldWidth: 100 width: 240 align: #center
+		button btnAccept "OK" width: 110 height: 24 across: 2 align: #left offset: [0, 10]
+		button btnCancel "Cancel" width: 110 height: 24 align: #right offset: [0, 10]
+		on passesDialog open do spnPasses.value = _rExportGCMatterportGLBConverter.selectedAOPasses()
+		on btnAccept pressed do (
+			acceptedPasses = spnPasses.value
+			destroyDialog passesDialog
+		)
+		on btnCancel pressed do destroyDialog passesDialog
+	)
+	createDialog passesDialog 260 76 modal: true
+	return passesDialog.acceptedPasses
+)
+
 rcmenu GCMatterportMaterialContextMenu (
 	menuItem previewUnwrapItem "Preview Unwrap Channel 2"
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
@@ -1051,11 +1069,15 @@ rcmenu GCMatterportMaterialContextMenu (
 	submenu "Passes" (
 		menuItem passes1 "1"
 		menuItem passes5 "5"
+		menuItem passes10 "10"
 		menuItem passes15 "15"
+		menuItem passes20 "20"
+		menuItem passes25 "25"
 		menuItem passes30 "30"
 		menuItem passes60 "60"
 		menuItem passes100 "100"
 		menuItem passes150 "150"
+		menuItem passesCustom "Custom..."
 	)
 	submenu "Override Resolution" (
 		menuItem resolution128 "128"
@@ -1090,6 +1112,10 @@ rcmenu GCMatterportMaterialContextMenu (
 	on aoDisable picked do _rExportGCMatterportGLBConverter.batchAOSetting #enabled false
 	on passes1 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 1
 	on passes5 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 5
+	on passes10 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 10
+	on passes20 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 20
+	on passes25 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 25
+	on passesCustom picked do _rExportGCMatterportGLBConverter.overrideSelectedAOPasses()
 	on passes15 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 15
 	on passes30 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 30
 	on passes60 picked do _rExportGCMatterportGLBConverter.batchAOSetting #passes 60
@@ -2814,6 +2840,28 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			local selectedColor = GCMatterportPickAOColor()
 			if (selectedColor != undefined) do didSave = batchAOSetting #occludedColor selectedColor
 		) catch (messageBox (getCurrentException() as string) title: "Override Color" beep: false)
+		tmrLODRefresh.active = wasTimerActive
+		return didSave
+	)
+
+	fn selectedAOPasses = (
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return 15
+		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntries[selectedRows[1]]
+		return (if (aoOptions == undefined) then 15 else aoOptions.passes)
+	)
+
+	fn overrideSelectedAOPasses = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return false
+		local wasTimerActive = tmrLODRefresh.active
+		local didSave = false
+		tmrLODRefresh.active = false
+		try (
+			local selectedPasses = GCMatterportPickAOPasses()
+			if (selectedPasses != undefined) do didSave = batchAOSetting #passes selectedPasses
+		) catch (messageBox (getCurrentException() as string) title: "Custom Passes" beep: false)
 		tmrLODRefresh.active = wasTimerActive
 		return didSave
 	)
