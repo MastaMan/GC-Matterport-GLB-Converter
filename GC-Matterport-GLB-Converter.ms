@@ -1058,6 +1058,24 @@ fn GCMatterportPickAOPasses = (
 	return passesDialog.acceptedPasses
 )
 
+fn GCMatterportPickAOSize = (
+	local sizeDialog
+	rollout sizeDialog "Custom Size (cm)" (
+		local acceptedSize = undefined
+		spinner spnSize "Size (cm): " range: [0.01, 9999.0, 5.0] type: #float fieldWidth: 100 width: 240 align: #center
+		button btnAccept "OK" width: 110 height: 24 across: 2 align: #left offset: [0, 10]
+		button btnCancel "Cancel" width: 110 height: 24 align: #right offset: [0, 10]
+		on sizeDialog open do spnSize.value = _rExportGCMatterportGLBConverter.selectedAOSize()
+		on btnAccept pressed do (
+			acceptedSize = spnSize.value
+			destroyDialog sizeDialog
+		)
+		on btnCancel pressed do destroyDialog sizeDialog
+	)
+	createDialog sizeDialog 260 76 modal: true
+	return sizeDialog.acceptedSize
+)
+
 rcmenu GCMatterportMaterialContextMenu (
 	menuItem previewUnwrapItem "Preview Unwrap Channel 2"
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
@@ -1090,10 +1108,14 @@ rcmenu GCMatterportMaterialContextMenu (
 	menuItem overrideColorItem "Override Color..."
 	submenu "Size (cm)" (
 		menuItem size5 "5"
+		menuItem size10 "10"
 		menuItem size15 "15"
+		menuItem size20 "20"
+		menuItem size25 "25"
 		menuItem size30 "30"
 		menuItem size60 "60"
 		menuItem size100 "100"
+		menuItem sizeCustom "Custom..."
 	)
 	submenu "V-Ray Denoiser" (
 		menuItem denoiserEnable "Enable"
@@ -1128,6 +1150,10 @@ rcmenu GCMatterportMaterialContextMenu (
 	on resolution2048 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 2048
 	on resolution4096 picked do _rExportGCMatterportGLBConverter.batchAOSetting #resolution 4096
 	on size5 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 5.0
+	on size10 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 10.0
+	on size20 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 20.0
+	on size25 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 25.0
+	on sizeCustom picked do _rExportGCMatterportGLBConverter.overrideSelectedAOSize()
 	on size15 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 15.0
 	on size30 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 30.0
 	on size60 picked do _rExportGCMatterportGLBConverter.batchAOSetting #sizeCM 60.0
@@ -2862,6 +2888,28 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			local selectedPasses = GCMatterportPickAOPasses()
 			if (selectedPasses != undefined) do didSave = batchAOSetting #passes selectedPasses
 		) catch (messageBox (getCurrentException() as string) title: "Custom Passes" beep: false)
+		tmrLODRefresh.active = wasTimerActive
+		return didSave
+	)
+
+	fn selectedAOSize = (
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return 5.0
+		local aoOptions = GCMatterportGetEffectiveAOOptions materialEntries[selectedRows[1]]
+		return (if (aoOptions == undefined) then 5.0 else aoOptions.sizeCM)
+	)
+
+	fn overrideSelectedAOSize = (
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return false
+		local wasTimerActive = tmrLODRefresh.active
+		local didSave = false
+		tmrLODRefresh.active = false
+		try (
+			local selectedSize = GCMatterportPickAOSize()
+			if (selectedSize != undefined) do didSave = batchAOSetting #sizeCM selectedSize
+		) catch (messageBox (getCurrentException() as string) title: "Custom Size (cm)" beep: false)
 		tmrLODRefresh.active = wasTimerActive
 		return didSave
 	)
