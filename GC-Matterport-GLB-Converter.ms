@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.1.2
+VERSION = 1.2.0
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,16 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.2.0]
+* Fixed: Preview Unwrap resolves the selected material when the command is invoked. =
+* Added: Override Color applies an AO color to selected material IDs through an OK/Cancel dialog. =
+* Changed: Default Corona AO occluded color is RGB 140, 140, 140; saved colors are preserved. =
+* Added: Passes and Size menus include 10, 20, 25 and Custom dialogs. =
+* Added: Material rows show their LOD0-LOD3 prefix, including mixed LOD selections. =
+* Added: Flatten Ch: 2 generates and packs UVs for selected material IDs, including objects without channel 1. =
+* Changed: Transfer IDs copies and packs only selected material IDs while preserving other channel 2 UVs. =
+* Improved: UV packing runs without opening Edit UVWs or rotating clusters; summaries show elapsed seconds. =
 
 [1.1.2]
 * Fixed: Shared AO Bitmaps are separated per material; unique maps are reused. =
