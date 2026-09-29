@@ -592,16 +592,24 @@ fn GCMatterportApplyAOMap materialRef filePath = (
 	local aoMap = if (previousMap != undefined) then previousMap else (Bitmaptexture name: "AO")
 	undo "Assign Matterport AO" on (
 		try (
-			-- Preserve material and map identities, including their shared references.
+			if (previousMap != undefined) do (
+				-- Detach this slot so glTF's internal material references do not count as sharing.
+				materialRef.ambientOcclusionMap = undefined
+				local hasOtherMapUsers = false
+				for ownerRef in (refs.dependents previousMap) do (
+					if (superClassOf ownerRef == material or superClassOf ownerRef == textureMap) do hasOtherMapUsers = true
+				)
+				if (hasOtherMapUsers) do aoMap = copy previousMap
+			)
 			aoMap.bitmap = aoBitmap
 			aoMap.coords.mapChannel = 2
-			if (previousMap == undefined) do materialRef.ambientOcclusionMap = aoMap
+			materialRef.ambientOcclusionMap = aoMap
 			if (previousMap == undefined or previousStrength <= 0) do materialRef.ambientOcclusion = 1.0
 			if (not GCMatterportHasAOMap materialRef) do throw "The completed AO map could not be validated."
 		) catch (
 			materialRef.ambientOcclusionMap = previousMap
 			materialRef.ambientOcclusion = previousStrength
-			if (previousMap != undefined) do (
+			if (previousMap != undefined and aoMap == previousMap) do (
 				previousMap.bitmap = previousBitmap
 				previousMap.coords.mapChannel = previousChannel
 			)
