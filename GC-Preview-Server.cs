@@ -144,9 +144,12 @@ class GCPreviewServer {
         }
         if(path=="/gc-screenshot/finish") {
             if(NextX!=0 || NextY!=Capture.Height) throw new IOException("Screenshot is incomplete.");
-            string stem=SafeName(ModelName);
-            string filePath=Path.Combine(SceneDirectory,stem+".png");
-            string temporary=Path.Combine(SceneDirectory,".gc-shot-"+CaptureId+".tmp");
+            string modelStem=System.Text.RegularExpressions.Regex.Replace(ModelName,@"_LOD[0-9]+$","",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            string stem=SafeName(modelStem);
+            string exportDirectory=Path.Combine(SceneDirectory,"export");
+            Directory.CreateDirectory(exportDirectory);
+            string filePath=Path.Combine(exportDirectory,stem+".png");
+            string temporary=Path.Combine(exportDirectory,".gc-shot-"+CaptureId+".tmp");
             try {
                 using(var output=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)) Capture.Save(output,ImageFormat.Png);
                 if(File.Exists(filePath)) File.Replace(temporary,filePath,null);
