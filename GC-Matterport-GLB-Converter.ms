@@ -3614,7 +3614,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		redrawViews()
 		local resultMessage = (if flattenChannel then "Selected material IDs flattened and packed in UV channel 2, and converted to Editable Poly on " else "Selected material IDs copied from channel 1 to 2, packed, and converted to Editable Poly on ") + (completedCount as string) + " object(s)."
 		operationTimer.Stop()
-		resultMessage += "\nElapsed: " + (formattedPrint (operationTimer.Elapsed.TotalSeconds as float) format: ".1f") + " sec."
+		resultMessage += "\n\nElapsed: " + (formattedPrint (operationTimer.Elapsed.TotalSeconds as float) format: ".1f") + " sec."
 		for reportLine in reportLines do resultMessage += "\n" + reportLine
 		lastUVOperationReport = resultMessage
 		if showSummary do messageBox resultMessage title: operationTitle beep: false
