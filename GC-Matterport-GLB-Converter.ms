@@ -2769,26 +2769,19 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	on lbxMaterials rightClick do (
-		if (not isRenderingAO) do (
-			local listHandle = getListHandle lbxMaterials
-			if (listHandle != 0 and materialEntries.count > 0) do (
-				local cursorPoint = windows.screenToClient listHandle mouse.screenpos applyUIScaling: false
-				local rowHeight = windows.sendMessage listHandle 0x01A1 0 0
-				local topIndex = windows.sendMessage listHandle 0x018E 0 0
-				local packedPoint = (bit.and (cursorPoint.x as integer) 65535) + (bit.shift (bit.and (cursorPoint.y as integer) 65535) 16)
-				local hitResult = windows.sendMessage listHandle 0x01A9 0 packedPoint
-				local rowIndex = if (rowHeight > 0) then (topIndex + (floor (cursorPoint.y / rowHeight) as integer) + 1) else 0
-				if (cursorPoint.y >= 0 and (bit.shift hitResult -16) == 0 and rowIndex >= 1 and rowIndex <= materialEntries.count) do (
-					if (not lbxMaterials.selection[rowIndex]) do lbxMaterials.selection = #{rowIndex}
-					refreshAOSettings()
-					local wasTimerActive = tmrLODRefresh.active
-					tmrLODRefresh.active = false
-					GCMatterportMaterialContextEntry = materialEntries[rowIndex]
-					try (popUpMenu GCMatterportMaterialContextMenu) catch (format "Materials menu: %\n" (getCurrentException()))
-					tmrLODRefresh.active = wasTimerActive
-				)
-			)
-		)
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = for rowIndex in (lbxMaterials.selection as array) where (rowIndex >= 1 and rowIndex <= materialEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return false
+		local wasTimerActive = tmrLODRefresh.active
+		tmrLODRefresh.active = false
+		GCMatterportMaterialContextEntry = undefined
+		try (
+			refreshAOSettings()
+			if (selectedRows.count == 1) do GCMatterportMaterialContextEntry = materialEntries[selectedRows[1]]
+			popUpMenu GCMatterportMaterialContextMenu
+		) catch (format "Materials menu: %\n" (getCurrentException()))
+		GCMatterportMaterialContextEntry = undefined
+		tmrLODRefresh.active = wasTimerActive
 	)
 
 	fn renderSelectedAO = (
@@ -3157,26 +3150,17 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 
 
 	on lbxLODs rightClick do (
-		local listHandle = getListHandle lbxLODs
-		if (listHandle != 0 and lodEntries.count > 0) do (
-			local cursorPoint = windows.screenToClient listHandle mouse.screenpos applyUIScaling: false
-			local rowHeight = windows.sendMessage listHandle 0x01A1 0 0
-			local topIndex = windows.sendMessage listHandle 0x018E 0 0
-			local packedPoint = (bit.and (cursorPoint.x as integer) 65535) + (bit.shift (bit.and (cursorPoint.y as integer) 65535) 16)
-			local hitResult = windows.sendMessage listHandle 0x01A9 0 packedPoint
-			-- ITEMFROMPOINT returns the nearest row even below the last item.
-			local rowIndex = if (rowHeight > 0) then (topIndex + (floor (cursorPoint.y / rowHeight) as integer) + 1) else 0
-			if (cursorPoint.y >= 0 and (bit.shift hitResult -16) == 0 and rowIndex >= 1 and rowIndex <= lodEntries.count) do (
-				if (not lbxLODs.selection[rowIndex]) do lbxLODs.selection = #{rowIndex}
-				refreshMaterials()
-				local wasTimerActive = tmrLODRefresh.active
-				tmrLODRefresh.active = false
-				try (popUpMenu GCMatterportLODContextMenu) catch (format "LOD menu failed: %\n" (getCurrentException()))
-				tmrLODRefresh.active = wasTimerActive
-			)
-		)
+		if (isRenderingAO or isExportingLODs) do return false
+		local selectedRows = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect rowIndex
+		if (selectedRows.count == 0) do return false
+		local wasTimerActive = tmrLODRefresh.active
+		tmrLODRefresh.active = false
+		try (
+			refreshMaterials()
+			popUpMenu GCMatterportLODContextMenu
+		) catch (format "LOD menu failed: %\n" (getCurrentException()))
+		tmrLODRefresh.active = wasTimerActive
 	)
-
 
 	fn addSelectedObjectToLOD = (
 		local selectedRows = lbxLODs.selection as array
