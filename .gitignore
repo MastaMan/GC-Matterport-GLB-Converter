@@ -11,3 +11,4 @@
 !/maxpkg-packager.ini
 !/maxpkg-changelog.ini
 /dist/
+/CHANGELOG-*.md
