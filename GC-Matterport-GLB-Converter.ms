@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.2.0
+VERSION = 1.2.1
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,10 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.2.1]
+* Changed: Google and PlayCanvas screenshots are saved in the scene's export folder. =
+* Changed: Screenshot filenames omit the trailing _LOD<number> suffix and retain the model name. =
 
 [1.2.0]
 * Fixed: Preview Unwrap resolves the selected material when the command is invoked. =
