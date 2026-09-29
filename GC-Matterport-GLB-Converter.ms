@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.1.1
+VERSION = 1.1.2
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,10 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.1.2]
+* Fixed: Shared AO Bitmaps are separated per material; unique maps are reused. =
+* Fixed: LOD and material context menus use current selection instead of cursor coordinates. =
 
 [1.1.1]
 * Added: Configurable Corona AO occluded color, default RGB 40, 40, 40. =
