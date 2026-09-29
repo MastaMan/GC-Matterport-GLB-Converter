@@ -1054,7 +1054,9 @@ global _rExportGCMatterportGLBConverter
 
 
 
-fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
+fn GCMatterportPreviewUnwrap materialEntry mapChannel = (
+	if (findItem #(1, 2) mapChannel == 0) do throw "Choose UV channel 1 or 2."
+	local channelCaption = mapChannel as string
 	if (not GCMatterportIsCurrentMaterialEntry materialEntry) do throw "The object or material assignment changed. Refresh Materials and select the ID again."
 	local targetNode = materialEntry.nodeRef
 	local sourceMesh = undefined
@@ -1064,28 +1066,34 @@ fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
 		local hasFaces = false
 		for faceIndex in 1 to sourceMesh.numfaces while not hasFaces do hasFaces = (getFaceMatID sourceMesh faceIndex == materialEntry.materialID)
 		if (not hasFaces) do throw "No faces use this Material ID."
-		if (not meshop.getMapSupport sourceMesh 2) do throw "UV channel 2 is missing. Preview does not create or unwrap UVs."
-		if (meshop.getNumMapVerts sourceMesh 2 == 0) do throw "UV channel 2 is empty."
+		if (meshop.getNumMaps sourceMesh <= mapChannel or not meshop.getMapSupport sourceMesh mapChannel) do throw ("UV channel " + channelCaption + " is missing. Preview does not create or unwrap UVs.")
+		if (meshop.getNumMapVerts sourceMesh mapChannel == 0) do throw ("UV channel " + channelCaption + " is empty.")
 	) catch (failureReason = getCurrentException() as string)
 	if (sourceMesh != undefined) do delete sourceMesh
 	if (failureReason != undefined) do throw failureReason
-	local previewName = "GC Preview Unwrap Channel 2"
+	local previewName = "GC Preview Unwrap Channel " + channelCaption
 	local previewModifier = undefined
 	for candidate in targetNode.modifiers where (classOf candidate == Unwrap_UVW and candidate.name == previewName) do (
 		if (previewModifier != undefined) do throw "Several preview modifiers exist. Keep one at the top of the stack."
 		previewModifier = candidate
 	)
 	if (previewModifier != undefined) do (
-		if (targetNode.modifiers[1] != previewModifier) do throw "Move GC Preview Unwrap Channel 2 to the top of the stack before previewing."
-		if (previewModifier.unwrap.getMapChannel() != 2) do throw "The preview modifier channel was changed. Restore channel 2 or remove that modifier."
+		for stackModifier in targetNode.modifiers while (stackModifier != previewModifier) do (
+			if (classOf stackModifier != Unwrap_UVW or findItem #("GC Preview Unwrap Channel 1", "GC Preview Unwrap Channel 2") stackModifier.name == 0) do throw ("Move " + previewName + " above other modifiers before previewing.")
+		)
+		local existingChannel = previewModifier.unwrap.getMapChannel()
+		-- Unwrap reports the first texture channel as zero; vertex color has a separate flag.
+		if (existingChannel == 0 and not previewModifier.unwrap.getVC()) do existingChannel = 1
+		if (previewModifier.unwrap.getVC() or existingChannel != mapChannel) do throw ("The preview modifier channel was changed. Restore channel " + channelCaption + " or remove that modifier.")
 		if ((refs.dependentNodes previewModifier).count != 1) do throw "The preview modifier is instanced. Make it unique before previewing."
 	)
-	undo "Preview Unwrap Channel 2" on (
+	undo "Preview Unwrap Channel" on (
 		select targetNode
 		max modify mode
 		if (previewModifier == undefined) do (
 			previewModifier = Unwrap_UVW name: previewName
-			previewModifier.unwrap.setMapChannel 2
+			previewModifier.unwrap.setVC false
+			previewModifier.unwrap.setMapChannel mapChannel
 			addModifier targetNode previewModifier before: 0
 		)
 		modPanel.setCurrentObject previewModifier
@@ -1101,6 +1109,10 @@ fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
 		previewModifier.unwrap.edit()
 	)
 	return true
+)
+
+fn GCMatterportPreviewUnwrapChannel2 materialEntry = (
+	return GCMatterportPreviewUnwrap materialEntry 2
 )
 
 fn GCMatterportPickAOColor = (
@@ -1158,7 +1170,10 @@ fn GCMatterportPickAOSize = (
 )
 
 rcmenu GCMatterportMaterialContextMenu (
-	menuItem previewUnwrapItem "Preview Unwrap Channel 2"
+	submenu "Preview Unwrap" (
+		menuItem previewUnwrapChannel1Item "Channel 1"
+		menuItem previewUnwrapItem "Channel 2"
+	)
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
 	separator previewSeparator
 	submenu "Use Corona AO" (
@@ -1203,8 +1218,12 @@ rcmenu GCMatterportMaterialContextMenu (
 		menuItem denoiserDisable "Disable"
 	)
 	on GCMatterportMaterialContextMenu open do (
+		previewUnwrapChannel1Item.enabled = (_rExportGCMatterportGLBConverter.selectedAOEntry() != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		previewUnwrapItem.enabled = (_rExportGCMatterportGLBConverter.selectedAOEntry() != undefined and not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		renderSelectedAOItem.enabled = _rExportGCMatterportGLBConverter.btnRenderAO.enabled
+	)
+	on previewUnwrapChannel1Item picked do (
+		try (GCMatterportPreviewUnwrap (_rExportGCMatterportGLBConverter.selectedAOEntry()) 1) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 1" beep: false)
 	)
 	on previewUnwrapItem picked do (
 		try (GCMatterportPreviewUnwrapChannel2 (_rExportGCMatterportGLBConverter.selectedAOEntry())) catch (messageBox (getCurrentException() as string) title: "Preview Unwrap Channel 2" beep: false)
@@ -3017,6 +3036,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			messageBox "Save the MAX scene before rendering AO. Images are saved beside the scene in export\\_maps." title: "Render AO" beep: false
 			return false
 		)
+		local aoOperationTimer = (dotNetClass "System.Diagnostics.Stopwatch").StartNew()
 		local outputFolder = maxFilePath + "export\\_maps\\"
 		local denoiserPath = GCMatterportDenoiserPath()
 		local completedCount = 0
@@ -3065,6 +3085,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		local summaryText = "AO rendered and assigned: " + (completedCount as string) + " of " + (selectedEntries.count as string) + ". Skipped: " + (skippedCount as string) + "."
 		if (completedCount > 0) do summaryText += "\nImages: " + outputFolder
 		for reportLine in reportLines do summaryText += "\n" + reportLine
+		aoOperationTimer.Stop()
+		summaryText += "\n\nElapsed: " + (formattedPrint (aoOperationTimer.Elapsed.TotalSeconds as float) format: ".1f") + " sec."
 		messageBox summaryText title: "Render AO" beep: false
 		return (completedCount + skippedCount == selectedEntries.count)
 	)
