@@ -3364,6 +3364,13 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") summaryText (dotNetObject "System.Text.UTF8Encoding" false)
 			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
 			local validationReportState = (dotNetClass "System.IO.File").ReadAllText (validationFolder + "report-status.txt")
+			if (allCompleted and validationReportState == "success") then (
+				summaryText = "SUCCESS: All GLB files passed validation. No errors detected.\n\n" + summaryText
+			) else if (validationReportState == "error") then (
+				summaryText = "VALIDATION ERRORS: See the validation report for details.\n\n" + summaryText
+			) else (
+				summaryText = "INCOMPLETE: Export or validation did not finish for all files.\n\n" + summaryText
+			)
 			if (validationReportState == "error") do ShellLaunch (validationFolder + "index.html") ""
 		) catch (
 			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
