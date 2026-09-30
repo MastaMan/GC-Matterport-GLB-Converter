@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.0
+VERSION = 1.4.1
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,9 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.1]
+* Fixed: Docked panels can shrink to the available height on high-DPI displays, with scrolling for overflowing content. =
 
 [1.4.0]
 * Added: Copy From duplicates an occupied LOD into an empty LOD with independent geometry and materials, removes copied AO maps and applies target LOD names. =
@@ -4302,7 +4305,7 @@ rollout _rSettingsGCMatterportGLBConverter "Settings" category: 998 (
 		)
 		if (floaterGCMatterportGLBConverter.dialogBar) do cui.UnRegisterDialogBar floaterGCMatterportGLBConverter
 		if (dockSide != 0) then (
-			cui.RegisterDialogBar floaterGCMatterportGLBConverter style: #(#cui_floatable, #cui_dock_vert, #cui_handles, #cui_max_sized, #style_toolwindow, #style_sysmenu)
+			cui.RegisterDialogBar floaterGCMatterportGLBConverter minSize: [360, 100] style: #(#cui_floatable, #cui_dock_vert, #cui_handles, #cui_max_sized, #style_toolwindow, #style_sysmenu)
 			cui.DockDialogBar floaterGCMatterportGLBConverter (if dockSide == 1 then #cui_dock_left else #cui_dock_right)
 		) else (
 			floaterGCMatterportGLBConverter.size = [360, 740]
