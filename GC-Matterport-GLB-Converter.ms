@@ -728,20 +728,27 @@ fn GCMatterportFormatMaterialRow materialEntry = (
 	return (lodPrefix + rowText)
 )
 
-fn GCMatterportUVChannelsMatch sourceMesh sourceChannel resultMesh resultChannel = (
-	if (sourceMesh.numfaces != resultMesh.numfaces or not meshop.getMapSupport sourceMesh sourceChannel or not meshop.getMapSupport resultMesh resultChannel) do return false
+fn GCMatterportUVChannelIssue sourceMesh sourceChannel resultMesh resultChannel = (
+	if (sourceMesh.numfaces != resultMesh.numfaces) do return "Face count changed; a specific material ID cannot be determined."
+	if (not meshop.getMapSupport sourceMesh sourceChannel or not meshop.getMapSupport resultMesh resultChannel) do return "UV channel is missing; this affects the whole object."
 	for faceIndex in 1 to sourceMesh.numfaces do (
-		local sourceFace = meshop.getMapFace sourceMesh sourceChannel faceIndex
-		local resultFace = meshop.getMapFace resultMesh resultChannel faceIndex
-		for cornerIndex in 1 to 3 do (
-			local sourceUV = meshop.getMapVert sourceMesh sourceChannel sourceFace[cornerIndex]
-			local resultUV = meshop.getMapVert resultMesh resultChannel resultFace[cornerIndex]
-			if (distance sourceUV resultUV > 0.00001) do return false
-		)
+		local faceContext = "Material ID " + ((getFaceMatID sourceMesh faceIndex) as string) + ", evaluated triangle " + (faceIndex as string)
+		try (
+			local sourceFace = meshop.getMapFace sourceMesh sourceChannel faceIndex
+			local resultFace = meshop.getMapFace resultMesh resultChannel faceIndex
+			for cornerIndex in 1 to 3 do (
+				local sourceUV = meshop.getMapVert sourceMesh sourceChannel sourceFace[cornerIndex]
+				local resultUV = meshop.getMapVert resultMesh resultChannel resultFace[cornerIndex]
+				if (distance sourceUV resultUV > 0.00001) do return (faceContext + ": UV coordinates differ.")
+			)
+		) catch (return (faceContext + ": " + (getCurrentException() as string)))
 	)
-	return true
+	return undefined
 )
 
+fn GCMatterportUVChannelsMatch sourceMesh sourceChannel resultMesh resultChannel = (
+	return (GCMatterportUVChannelIssue sourceMesh sourceChannel resultMesh resultChannel == undefined)
+)
 fn GCMatterportCopySelectedUVs targetNode sourceMesh selectedIDs = (
  local transferNode = undefined
  local preparedMesh = undefined
@@ -765,7 +772,11 @@ fn GCMatterportCopySelectedUVs targetNode sourceMesh selectedIDs = (
   for faceIndex in 1 to faceCount do (
    local materialID = if isPoly then polyop.getFaceMatID transferNode faceIndex else getFaceMatID transferNode faceIndex
    local isSelected = (findItem selectedIDs materialID > 0)
-   local mapFace = mapAPI.getMapFace transferNode (if isSelected then 1 else baseChannel) faceIndex
+   local mapFace = undefined
+   local faceFailure = undefined
+   try (mapFace = mapAPI.getMapFace transferNode (if isSelected then 1 else baseChannel) faceIndex)
+   catch (faceFailure = getCurrentException() as string)
+   if (faceFailure != undefined) do throw ("Material ID " + (materialID as string) + ", source face " + (faceIndex as string) + ": " + faceFailure)
    if isSelected do (
     if isPoly then (
      for cornerIndex in 1 to mapFace.count do mapFace[cornerIndex] += baseVertices.count
@@ -785,7 +796,8 @@ fn GCMatterportCopySelectedUVs targetNode sourceMesh selectedIDs = (
   ChannelInfo.CopyChannel transferNode 3 2
   ChannelInfo.PasteChannel targetNode 3 2
   copiedMesh = snapshotAsMesh targetNode
-  if (not GCMatterportUVChannelsMatch preparedMesh 2 copiedMesh 2) do throw "Selected UV transfer did not match the prepared channel."
+  local transferIssue = GCMatterportUVChannelIssue preparedMesh 2 copiedMesh 2
+  if (transferIssue != undefined) do throw ("Selected UV transfer did not match the prepared channel. " + transferIssue)
  ) catch (failureReason = getCurrentException() as string)
  if copiedMesh != undefined do delete copiedMesh
  if preparedMesh != undefined do delete preparedMesh
@@ -797,13 +809,14 @@ fn GCMatterportCopySelectedUVs targetNode sourceMesh selectedIDs = (
 fn GCMatterportValidatePackedUVs sourceMesh resultMesh selectedIDs untouchedChannel: 1 = (
 	if (sourceMesh.numfaces != resultMesh.numfaces) do return "Face count changed."
 	if (meshop.getMapSupport sourceMesh 1 or meshop.getMapSupport resultMesh 1) do (
-		if (not GCMatterportUVChannelsMatch sourceMesh 1 resultMesh 1) do return "Source UV channel 1 changed."
+		local sourceIssue = GCMatterportUVChannelIssue sourceMesh 1 resultMesh 1
+		if (sourceIssue != undefined) do return ("Source UV channel 1 changed. " + sourceIssue)
 	)
 	if (not meshop.getMapSupport resultMesh 2) do return "Result UV channel 2 is missing."
 	local uvBounds = for materialID in selectedIDs collect #(1e9, 1e9, -1e9, -1e9, 0)
 	for faceIndex in 1 to resultMesh.numfaces do (
 		local materialID = getFaceMatID resultMesh faceIndex
-		if (getFaceMatID sourceMesh faceIndex != materialID) do return "Face material IDs changed."
+		if (getFaceMatID sourceMesh faceIndex != materialID) do return ("Evaluated triangle " + (faceIndex as string) + ": Material ID changed from " + ((getFaceMatID sourceMesh faceIndex) as string) + " to " + (materialID as string) + ".")
 		local idIndex = findItem selectedIDs materialID
 		local resultFace = meshop.getMapFace resultMesh 2 faceIndex
 		for cornerIndex in 1 to 3 do (
@@ -812,7 +825,7 @@ fn GCMatterportValidatePackedUVs sourceMesh resultMesh selectedIDs untouchedChan
 				if (meshop.getNumMaps sourceMesh > untouchedChannel and meshop.getMapSupport sourceMesh untouchedChannel) do (
 					local sourceFace = meshop.getMapFace sourceMesh untouchedChannel faceIndex
 					local sourceUV = meshop.getMapVert sourceMesh untouchedChannel sourceFace[cornerIndex]
-					if (distance sourceUV resultUV > 0.00001) do return "An unselected material ID was repacked."
+					if (distance sourceUV resultUV > 0.00001) do return ("Unselected Material ID " + (materialID as string) + ", evaluated triangle " + (faceIndex as string) + ": UV coordinates changed.")
 				)
 			) else (
 				local idBounds = uvBounds[idIndex]
@@ -2870,6 +2883,44 @@ rollout _rReferenceGCMatterportGLBConverter "Quality Reference" category: 2 (
 	)
 )
 
+try (destroyDialog GCMatterportUVReportRollout) catch()
+rollout GCMatterportUVReportRollout "UV Operation Report" (
+	dotNetControl lblStatus "System.Windows.Forms.Label" pos: [12,12] width: 496 height: 38
+	dotNetControl txtReport "System.Windows.Forms.RichTextBox" pos: [12,60] width: 496 height: 262
+	button btnCopy "Copy Report" pos: [12,337] width: 120 height: 26
+	button btnClose "Close" pos: [388,337] width: 120 height: 26
+	fn showReport reportContent hasErrors = (
+		local drawingColor = dotNetClass "System.Drawing.Color"
+		lblStatus.Text = if hasErrors then "COMPLETED WITH ERRORS" else "SUCCESS"
+		lblStatus.BackColor = if hasErrors then drawingColor.FromArgb 90 35 35 else drawingColor.FromArgb 30 75 48
+		lblStatus.ForeColor = drawingColor.FromArgb 245 245 245
+		lblStatus.TextAlign = (dotNetClass "System.Drawing.ContentAlignment").MiddleCenter
+		lblStatus.Font = dotNetObject "System.Drawing.Font" "Segoe UI" 12.0 ((dotNetClass "System.Drawing.FontStyle").Bold)
+		txtReport.ReadOnly = true
+		txtReport.WordWrap = true
+		txtReport.DetectUrls = false
+		txtReport.ScrollBars = (dotNetClass "System.Windows.Forms.RichTextBoxScrollBars").Vertical
+		txtReport.BorderStyle = (dotNetClass "System.Windows.Forms.BorderStyle").None
+		local reportBackground = (colorMan.getColor #rollupTitleFace) * 255
+		local reportForeground = (colorMan.getColor #rollupTitleText) * 255
+		txtReport.BackColor = drawingColor.FromArgb (reportBackground.x as integer) (reportBackground.y as integer) (reportBackground.z as integer)
+		txtReport.ForeColor = drawingColor.FromArgb (reportForeground.x as integer) (reportForeground.y as integer) (reportForeground.z as integer)
+		txtReport.Font = dotNetObject "System.Drawing.Font" "Segoe UI" 9.0
+		txtReport.Clear()
+		for reportLine in (filterString reportContent "\n" splitEmptyTokens: true) do (
+			txtReport.SelectionStart = txtReport.TextLength
+			txtReport.SelectionLength = 0
+			txtReport.SelectionColor = txtReport.ForeColor
+			if (matchPattern reportLine pattern: "Layer:*") do txtReport.SelectionColor = drawingColor.FromArgb 85 160 220
+			if (matchPattern reportLine pattern: "Reason:*") do txtReport.SelectionColor = drawingColor.FromArgb 220 95 80
+			txtReport.AppendText (reportLine + "\r\n")
+		)
+		txtReport.Select 0 0
+		return true
+	)
+	on btnCopy pressed do setClipBoardText txtReport.Text
+	on btnClose pressed do destroyDialog GCMatterportUVReportRollout
+)
 rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (	
 	label lblCompleteStatus "Complete status: [GLB] [AO]" align: #left width: 326 toolTip: "GLB: exported file exists. AO: all enabled material IDs have AO maps. Check: one object with valid glTF materials."
 	group "LODs" (
@@ -3997,7 +4048,12 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 							modifierIndex += 1
 						)
 					)
-					append reportLines (targetNode.name + " [" + operationStage + "]: " + failureReason)
+					local selectedIDCaption = ""
+					for materialEntry in selectedEntries where (materialEntry.nodeRef == targetNode) do (
+						if (selectedIDCaption != "") do selectedIDCaption += ", "
+						selectedIDCaption += (materialEntry.materialID as string)
+					)
+					append reportLines ("Layer: " + targetNode.layer.name + "\nObject: " + targetNode.name + "\nSelected Material IDs: " + selectedIDCaption + "\nStage: " + operationStage + "\nReason: " + failureReason + "\n")
 				)
 			)
 		)
@@ -4033,7 +4089,12 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		resultMessage += "\n\nElapsed: " + (formattedPrint (operationTimer.Elapsed.TotalSeconds as float) format: ".1f") + " sec."
 		for reportLine in reportLines do resultMessage += "\n" + reportLine
 		lastUVOperationReport = resultMessage
-		if showSummary do messageBox resultMessage title: operationTitle beep: false
+		if showSummary do (
+			try (destroyDialog GCMatterportUVReportRollout) catch()
+			createDialog GCMatterportUVReportRollout 520 375 style: #(#style_titlebar, #style_border, #style_sysmenu)
+			GCMatterportUVReportRollout.title = operationTitle
+			GCMatterportUVReportRollout.showReport resultMessage (reportLines.count > 0)
+		)
 		return (reportLines.count == 0)
 	)
 
