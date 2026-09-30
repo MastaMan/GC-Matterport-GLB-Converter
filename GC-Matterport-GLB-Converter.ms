@@ -2845,7 +2845,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
 
 	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
-	checkbox cbxShowValidationReport "Show validation report on errors" checked: true enabled: false width: 310 align: #center toolTip: "Always open the report when validation finds errors or fails. Successful reports are saved without opening."
+	checkbox cbxShowValidationReport "Show validation report on errors" checked: true width: 310 align: #center toolTip: "Open the report on validation errors. Saved with this scene. GLB validation always runs."
 
 	local isExportingLODs = false
 	local isRenderingAO = false
@@ -3371,7 +3371,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			) else (
 				summaryText = "INCOMPLETE: Export or validation did not finish for all files.\n\n" + summaryText
 			)
-			if (validationReportState == "error") do ShellLaunch (validationFolder + "index.html") ""
+			if (validationReportState == "error" and cbxShowValidationReport.checked) do ShellLaunch (validationFolder + "index.html") ""
 		) catch (
 			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
 		)
@@ -4021,8 +4021,17 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on lbxLODs selected rowIndex do refreshMaterials()
 
 	on btnRefresList pressed do (GCMatterportGeometrySummaryCache = #(); refreshLODs())
+	fn refreshValidationReportSetting = (
+		local showReport = GCMatterportSceneProperties.getValue "GC.Matterport.ShowValidationReportOnErrors" true
+		cbxShowValidationReport.checked = if (classOf showReport == BooleanClass) then showReport else true
+		return cbxShowValidationReport.checked
+	)
+
+	on cbxShowValidationReport changed isChecked do GCMatterportSceneProperties.setValue "GC.Matterport.ShowValidationReportOnErrors" isChecked
+
 	on tmrLODRefresh tick do (
 		try (
+			refreshValidationReportSetting()
 			if (not syncSceneSelection()) do refreshLODs()
 		) catch (
 			tmrLODRefresh.active = false
@@ -4031,6 +4040,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	on _rExportGCMatterportGLBConverter open do (
+		refreshValidationReportSetting()
 		lblCompleteStatus.text = "Complete status: [GLB] [AO] [" + (dotNetClass "System.Char").ConvertFromUtf32 10003 + "]"
 		-- Spinner.pos is its arrow position, not the start of its caption.
 		-- Keep fixed-width material actions separated inside the narrow rollout.
