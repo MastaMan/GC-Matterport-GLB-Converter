@@ -2805,6 +2805,42 @@ rollout _rBoilerplateGCMatterportGLBConverter "Boilerplate" category: 2 (
 	)
 )
 
+try (destroyDialog _rReferenceGCMatterportGLBConverter) catch()
+rollout _rReferenceGCMatterportGLBConverter "Quality Reference" category: 2 (
+	dotNetControl lvQualityReference "System.Windows.Forms.ListView" width: 506 height: 142 align: #center
+	label lblReferenceUnits "Texture: pixels per side. Tris: approximate counts." width: 506 align: #center
+	on _rReferenceGCMatterportGLBConverter open do (
+		lvQualityReference.View = (dotNetClass "System.Windows.Forms.View").Details
+		lvQualityReference.HeaderStyle = (dotNetClass "System.Windows.Forms.ColumnHeaderStyle").Nonclickable
+		lvQualityReference.FullRowSelect = true
+		lvQualityReference.MultiSelect = false
+		lvQualityReference.LabelEdit = false
+		lvQualityReference.ShowItemToolTips = true
+		lvQualityReference.GridLines = true
+		lvQualityReference.BackColor = (dotNetClass "System.Drawing.SystemColors").Window
+		lvQualityReference.ForeColor = (dotNetClass "System.Drawing.SystemColors").WindowText
+		lvQualityReference.Columns.Clear()
+		lvQualityReference.Items.Clear()
+		lvQualityReference.Columns.Add "LOD" 50
+		lvQualityReference.Columns.Add "Use" 204
+		lvQualityReference.Columns.Add "Texture" 70
+		lvQualityReference.Columns.Add "Soft tris" 89
+		lvQualityReference.Columns.Add "Hard tris" 89
+		local referenceRows = #(
+			#("LOD0", "Highest quality", "4096", "15k-30k", "10k-17k", "Highest quality"),
+			#("LOD1", "Showcase desktop", "2048", "7.5k-15k", "5k-10k", "Showcase desktop (likely maximum)"),
+			#("LOD2", "Showcase mobile", "1024", "4k-7.5k", "2k-5k", "Showcase mobile (likely maximum)"),
+			#("LOD3", "Initial load / Dollhouse", "512", "500-4k", "500-2k", "Initial loading during fly-in to Dollhouse")
+		)
+		for referenceRow in referenceRows do (
+			local rowItem = dotNetObject "System.Windows.Forms.ListViewItem" referenceRow[1]
+			for columnIndex in 2 to 5 do rowItem.SubItems.Add referenceRow[columnIndex]
+			rowItem.ToolTipText = referenceRow[6]
+			lvQualityReference.Items.Add rowItem
+		)
+	)
+)
+
 rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (	
 	label lblCompleteStatus "Complete status: [GLB] [AO]" align: #left width: 326 toolTip: "GLB: exported file exists. AO: all enabled material IDs have AO maps. Check: one object with valid glTF materials."
 	group "LODs" (
@@ -2859,6 +2895,12 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	local previousSceneSelection = undefined
 
 	timer tmrLODRefresh interval: 500 active: false
+	dotNetControl btnQualityReference "System.Windows.Forms.Button" width: 16 height: 16 pos: [318, 24]
+	on btnQualityReference Click do (
+		try (destroyDialog _rReferenceGCMatterportGLBConverter) catch()
+		local referencePosition = floaterGCMatterportGLBConverter.pos + [floaterGCMatterportGLBConverter.size.x + 15, 0]
+		createDialog _rReferenceGCMatterportGLBConverter 530 182 pos: referencePosition style: #(#style_titlebar, #style_sysmenu, #style_toolwindow)
+	)
 
 	fn transformSelectedObjects operationMode = (
 		local selectedNodes = for sceneNode in selection where (isValidNode sceneNode) collect sceneNode
@@ -4040,6 +4082,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	)
 
 	on _rExportGCMatterportGLBConverter open do (
+		btnQualityReference.Text = "?"
+		btnQualityReference.FlatStyle = (dotNetClass "System.Windows.Forms.FlatStyle").Popup
+		btnQualityReference.AccessibleName = "Quality Reference"
+		btnQualityReference.pos = [lbxLODs.pos.x + lbxLODs.width - 16, lbxLODs.pos.y - 20]
 		refreshValidationReportSetting()
 		lblCompleteStatus.text = "Complete status: [GLB] [AO] [" + (dotNetClass "System.Char").ConvertFromUtf32 10003 + "]"
 		-- Spinner.pos is its arrow position, not the start of its caption.
