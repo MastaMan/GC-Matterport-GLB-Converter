@@ -2642,6 +2642,8 @@ rcmenu GCMatterportLODContextMenu (
 	menuItem liveMaterialsItem "Live Preview Materials..."
 	separator validationSeparator
 	menuItem validateGLBItem "Validate GLB"
+	separator sceneFolderSeparator
+	menuItem openSceneFolderItem "Open Scene Folder"
 	separator copyFromSeparator
 	submenu "Copy From" (
 		menuItem copyFromLOD0Item "LOD0"
@@ -2649,8 +2651,6 @@ rcmenu GCMatterportLODContextMenu (
 		menuItem copyFromLOD2Item "LOD2"
 		menuItem copyFromLOD3Item "LOD3"
 	)
-	separator sceneFolderSeparator
-	menuItem openSceneFolderItem "Open Scene Folder"
 	separator previewSeparator
 	menuItem copyPropertiesItem "Copy Material Properties"
 	menuItem pastePropertiesItem "Paste Material Properties"
