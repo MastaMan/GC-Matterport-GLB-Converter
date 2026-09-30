@@ -2642,6 +2642,13 @@ rcmenu GCMatterportLODContextMenu (
 	menuItem liveMaterialsItem "Live Preview Materials..."
 	separator validationSeparator
 	menuItem validateGLBItem "Validate GLB"
+	separator copyFromSeparator
+	submenu "Copy From" (
+		menuItem copyFromLOD0Item "LOD0"
+		menuItem copyFromLOD1Item "LOD1"
+		menuItem copyFromLOD2Item "LOD2"
+		menuItem copyFromLOD3Item "LOD3"
+	)
 	separator sceneFolderSeparator
 	menuItem openSceneFolderItem "Open Scene Folder"
 	separator previewSeparator
@@ -2653,12 +2660,20 @@ rcmenu GCMatterportLODContextMenu (
 		previewLODItem.enabled = _rExportGCMatterportGLBConverter.canPreviewLOD()
 		previewPCLODItem.enabled = previewLODItem.enabled
 		validateGLBItem.enabled = _rExportGCMatterportGLBConverter.canValidateSelectedGLBs()
+		copyFromLOD0Item.enabled = (_rExportGCMatterportGLBConverter.copyFromLayers 0 != undefined)
+		copyFromLOD1Item.enabled = (_rExportGCMatterportGLBConverter.copyFromLayers 1 != undefined)
+		copyFromLOD2Item.enabled = (_rExportGCMatterportGLBConverter.copyFromLayers 2 != undefined)
+		copyFromLOD3Item.enabled = (_rExportGCMatterportGLBConverter.copyFromLayers 3 != undefined)
 		copyPropertiesItem.enabled = _rExportGCMatterportGLBConverter.canCopyLODProperties()
 		pastePropertiesItem.enabled = _rExportGCMatterportGLBConverter.canPasteLODProperties()
 	)
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
 	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
 	on validateGLBItem picked do _rExportGCMatterportGLBConverter.validateSelectedGLBs()
+	on copyFromLOD0Item picked do _rExportGCMatterportGLBConverter.copyFromLOD 0
+	on copyFromLOD1Item picked do _rExportGCMatterportGLBConverter.copyFromLOD 1
+	on copyFromLOD2Item picked do _rExportGCMatterportGLBConverter.copyFromLOD 2
+	on copyFromLOD3Item picked do _rExportGCMatterportGLBConverter.copyFromLOD 3
 	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 344 110)
 	on openSceneFolderItem picked do GCMatterportOpenSceneFolder()
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
@@ -3292,6 +3307,80 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 
 	on btnRenderAO pressed do renderSelectedAO()
 
+
+	fn copyFromLayers sourceLOD = (
+		if (isRenderingAO or isExportingLODs) do return undefined
+		local selectedRows = lbxLODs.selection as array
+		if (selectedRows.count != 1) do return undefined
+		local rowIndex = selectedRows[1]
+		if (rowIndex < 1 or rowIndex > lodEntries.count) do return undefined
+		local targetLayerName = lodEntries[rowIndex].layerName
+		local baseName = _rBoilerplateGCMatterportGLBConverter.getLODBaseName targetLayerName
+		if (baseName == undefined) do return undefined
+		local targetLayer = LayerManager.getLayerFromName targetLayerName
+		local sourceLayer = LayerManager.getLayerFromName ("GC-" + baseName + "_LOD" + (sourceLOD as string))
+		if (targetLayer == undefined or sourceLayer == undefined or targetLayer == sourceLayer) do return undefined
+		local targetNodes = #()
+		local sourceNodes = #()
+		targetLayer.nodes &targetNodes
+		sourceLayer.nodes &sourceNodes
+		if (targetNodes.count != 0 or sourceNodes.count == 0) do return undefined
+		return #(targetLayer, sourceLayer, sourceNodes)
+	)
+
+	fn copyFromLOD sourceLOD = (
+		local copyLayers = copyFromLayers sourceLOD
+		if (copyLayers == undefined) do return false
+		local copiedNodes = #()
+		local originalNodes = #()
+		local failureReason = undefined
+		local previousTimerActive = tmrLODRefresh.active
+		tmrLODRefresh.active = false
+		undo "Copy From LOD" on (
+			try (
+				if (not maxOps.cloneNodes copyLayers[3] cloneType: #copy expandHierarchy: false actualNodeList: &originalNodes newNodes: &copiedNodes) do throw "Could not copy the source objects."
+				if (copiedNodes.count != originalNodes.count) do throw "The copied object list is incomplete."
+				for nodeIndex in 1 to copiedNodes.count do (
+					local copiedNode = copiedNodes[nodeIndex]
+					local sourceNode = originalNodes[nodeIndex]
+					copiedNode.name = copyLayers[1].name
+					if (sourceNode.material != undefined) do (
+						copiedNode.material = copy sourceNode.material
+						copiedNode.material.name = copyLayers[1].name
+						local lodSuffix = substring copyLayers[1].name (copyLayers[1].name.count - 3) 4
+						local pendingMaterials = #(copiedNode.material)
+						local visitedMaterials = #()
+						while pendingMaterials.count > 0 do (
+							local currentMaterial = pendingMaterials[pendingMaterials.count]
+							deleteItem pendingMaterials pendingMaterials.count
+							if (currentMaterial != undefined and findItem visitedMaterials currentMaterial == 0) do (
+								append visitedMaterials currentMaterial
+								if (isProperty currentMaterial #ambientOcclusionMap) do currentMaterial.ambientOcclusionMap = undefined
+								for slotIndex in 1 to (getNumSubMtls currentMaterial) do (
+									local subMaterial = getSubMtl currentMaterial slotIndex
+									if (subMaterial != undefined) do (
+										local materialID = if classOf currentMaterial == MultiMaterial then currentMaterial.materialIDList[slotIndex] else slotIndex
+										subMaterial.name = "ID" + (materialID as string) + "_" + lodSuffix
+										if classOf currentMaterial == MultiMaterial do currentMaterial.names[slotIndex] = subMaterial.name
+										append pendingMaterials subMaterial
+									)
+								)
+							)
+						)
+					)
+					if (copiedNode.parent != undefined and findItem copiedNodes copiedNode.parent == 0) do copiedNode.parent = undefined
+					copyLayers[1].addNode copiedNode
+				)
+			) catch (
+				failureReason = getCurrentException() as string
+				for copiedNode in copiedNodes where isValidNode copiedNode do delete copiedNode
+			)
+		)
+		tmrLODRefresh.active = previousTimerActive
+		refreshLODs()
+		if (failureReason != undefined) do messageBox failureReason title: "Copy From LOD" beep: false
+		return (failureReason == undefined)
+	)
 
 	fn canValidateSelectedGLBs = (
 		if (isRenderingAO or isExportingLODs or maxFilePath == "" or maxFileName == "") do return false
