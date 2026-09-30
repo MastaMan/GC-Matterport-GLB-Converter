@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.1
+VERSION = 1.4.2
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,10 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.2]
+* Improved: UV errors identify the LOD layer, object, material ID and affected face where available. =
+* Added: Scrollable themed Transfer and Flatten reports with colored status and Copy Report. =
 
 [1.4.1]
 * Fixed: Docked panels can shrink to the available height on high-DPI displays, with scrolling for overflowing content. =
