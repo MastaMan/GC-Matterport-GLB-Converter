@@ -148,10 +148,16 @@ class GCPreviewServer {
             string stem=SafeName(modelStem);
             string exportDirectory=Path.Combine(SceneDirectory,"export");
             Directory.CreateDirectory(exportDirectory);
-            string filePath=Path.Combine(exportDirectory,stem+".png");
+            string filePath=Path.Combine(exportDirectory,stem+".jpg");
             string temporary=Path.Combine(exportDirectory,".gc-shot-"+CaptureId+".tmp");
             try {
-                using(var output=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)) Capture.Save(output,ImageFormat.Png);
+                ImageCodecInfo jpegEncoder=null;
+                foreach(var encoder in ImageCodecInfo.GetImageEncoders()) if(encoder.FormatID==ImageFormat.Jpeg.Guid) { jpegEncoder=encoder; break; }
+                if(jpegEncoder==null) throw new IOException("JPEG encoder is unavailable.");
+                using(var parameters=new EncoderParameters(1)) {
+                    parameters.Param[0]=new EncoderParameter(System.Drawing.Imaging.Encoder.Quality,95L);
+                    using(var output=new FileStream(temporary,FileMode.CreateNew,FileAccess.Write,FileShare.None)) Capture.Save(output,jpegEncoder,parameters);
+                }
                 if(File.Exists(filePath)) File.Replace(temporary,filePath,null);
                 else File.Move(temporary,filePath);
                 SendJson(stream,200,new {path=filePath,width=Capture.Width,height=Capture.Height});

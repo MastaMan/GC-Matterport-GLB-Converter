@@ -8,7 +8,7 @@
   document.head.append(style);
   style.textContent += '#gc-screenshot-controls>button{box-sizing:border-box;height:38px;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle}';
   const ui = document.createElement('div'); ui.id = 'gc-screenshot-controls';
-  ui.innerHTML = '<button id="gc-take-shot" type="button">Take Screenshot</button> <button id="gc-shot-settings" type="button" aria-label="Screenshot Settings" title="Screenshot Settings">⚙</button><div id="gc-screenshot-menu" hidden><label>Square PNG</label><select id="gc-shot-size"><option value="512">512 × 512</option><option value="1024">1024 × 1024</option><option value="2048" selected>2048 × 2048</option><option value="4096">4096 × 4096</option><option value="custom">Custom size...</option></select><label id="gc-custom-row" hidden>Side, pixels <input id="gc-custom-size" type="number" min="128" max="10000" step="1" value="4096" style="width:100px"></label><p>Keeps the camera view. Renders a square frame.</p></div><div id="gc-screenshot-status" role="status" hidden></div>';
+  ui.innerHTML = '<button id="gc-take-shot" type="button">Take Screenshot</button> <button id="gc-shot-settings" type="button" aria-label="Screenshot Settings" title="Screenshot Settings">⚙</button><div id="gc-screenshot-menu" hidden><label>Square JPEG</label><select id="gc-shot-size"><option value="512">512 × 512</option><option value="1024">1024 × 1024</option><option value="2048" selected>2048 × 2048</option><option value="4096">4096 × 4096</option><option value="custom">Custom size...</option></select><label id="gc-custom-row" hidden>Side, pixels <input id="gc-custom-size" type="number" min="128" max="10000" step="1" value="4096" style="width:100px"></label><p>Keeps the camera view. Renders a square frame.</p></div><div id="gc-screenshot-status" role="status" hidden></div>';
   document.body.append(ui);
   const get = id => document.getElementById(id);
   // Lucide Focus and Settings icons, https://lucide.dev (ISC).
@@ -246,7 +246,7 @@
         completed++;
       }
       if(cancelled) throw new Error('Screenshot cancelled.');
-      status('Saving PNG '+size+' × '+size+'…');
+      status('Saving JPEG '+size+' × '+size+'…');
       const result=await api('finish','',{'X-GC-Capture':captureId});
       captureId=null; status('Saved: '+result.path); return result;
     } finally {
