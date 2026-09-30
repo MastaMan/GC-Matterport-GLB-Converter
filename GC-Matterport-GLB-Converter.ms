@@ -1234,7 +1234,7 @@ fn GCMatterportOverrideTextureSize = (
 rcmenu GCMatterportMaterialContextMenu (
 	submenu "Preview Unwrap" (
 		menuItem previewUnwrapChannel1Item "Channel 1"
-		menuItem previewUnwrapItem "Channel 2"
+		menuItem previewUnwrapItem "Channel 2 (AO)"
 	)
 	menuItem renderSelectedAOItem "Render AO for Selected IDs"
 	menuItem overrideTextureSizeItem "Override Textures Size..."
