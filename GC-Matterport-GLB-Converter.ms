@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.3.0
+VERSION = 1.4.0
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,16 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.0]
+* Added: Copy From duplicates an occupied LOD into an empty LOD with independent geometry and materials, removes copied AO maps and applies target LOD names. =
+* Added: Settings can dock the converter to the left or right and restore the selected position on startup. =
+* Added: A compact help button opens a LOD quality reference table beside the converter. =
+* Changed: Both preview viewers save screenshots as JPEG at 95 percent quality. =
+* Added: Validate GLB in the LOD menu always opens a report; successful validation is saved and displayed as a GLB checkmark until the file changes. =
+* Improved: Batch export opens validation reports only on errors and shows an overall validation status in its completion dialog. =
+* Added: The validation report display preference is saved with the scene. =
+* Improved: Preview Unwrap identifies channel 2 as AO. =
 
 [1.3.0]
 * Added: Preview Unwrap supports UV channels 1 and 2. =
