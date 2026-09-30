@@ -957,6 +957,40 @@ fn GCMatterportLODHasGLB layerName = (
 	return (doesFileExist filePath and getFileSize filePath > 0)
 )
 
+fn GCMatterportGLBSignature filePath = (
+	if (not doesFileExist filePath) do return ""
+	local fileInfo = dotNetObject "System.IO.FileInfo" filePath
+	return (toLower fileInfo.FullName) + "|" + (fileInfo.Length as string) + "|" + (fileInfo.LastWriteTimeUtc.Ticks as string)
+)
+
+fn GCMatterportGLBValidationKey layerName = (
+	return (dotNetClass "System.Uri").EscapeDataString layerName
+)
+
+fn GCMatterportClearGLBValidation layerName = (
+	local statusFilePath = maxFilePath + "export\\validation-status.ini"
+	if (doesFileExist statusFilePath) do delINISetting statusFilePath (GCMatterportGLBValidationKey layerName)
+	return true
+)
+
+fn GCMatterportLODGLBValidated layerName = (
+	local signatureContent = GCMatterportGLBSignature (maxFilePath + "export\\" + (GCMatterportExportFileName layerName))
+	local statusFilePath = maxFilePath + "export\\validation-status.ini"
+	local statusKey = GCMatterportGLBValidationKey layerName
+	return (signatureContent != "" and getINISetting statusFilePath statusKey "status" == "success" and getINISetting statusFilePath statusKey "signature" == signatureContent)
+)
+
+fn GCMatterportMarkGLBValidation layerName filePath reportFolder = (
+	local summaryLines = (dotNetClass "System.IO.File").ReadAllLines (reportFolder + (filenameFromPath filePath) + ".summary.txt")
+	local signatureContent = if (summaryLines.count == 2 and summaryLines[1] == "0") then GCMatterportGLBSignature filePath else ""
+	local statusFilePath = (getFilenamePath filePath) + "validation-status.ini"
+	local statusKey = GCMatterportGLBValidationKey layerName
+	setINISetting statusFilePath statusKey "signature" signatureContent
+	setINISetting statusFilePath statusKey "checkedAtUtc" ((dotNetClass "System.DateTime").UtcNow.ToString "o")
+	setINISetting statusFilePath statusKey "status" (if signatureContent != "" then "success" else "error")
+	return (signatureContent != "")
+)
+
 fn GCMatterportGetData = (
 	local lodLayerNames = #()
 	for layerIndex in 0 to (LayerManager.count - 1) do (
@@ -989,6 +1023,7 @@ fn GCMatterportGetData = (
 			displayPrefix = "[Only Object] "
 		)
 		local glbPrefix = if (GCMatterportLODHasGLB sceneLayerName) then "[GLB] " else ""
+		if (glbPrefix != "" and GCMatterportLODGLBValidated sceneLayerName) do glbPrefix = "[" + ((dotNetClass "System.Char").ConvertFromUtf32 10003) + "GLB] "
 		local aoPrefix = if (isLayerReady and GCMatterportLODHasAO sceneLayerName) then "[AO] " else ""
 		GCMatterportLODEntry layerName: sceneLayerName displayText: (glbPrefix + aoPrefix + displayPrefix + sceneLayerName + countCaption) objectCount: layerNodes.count isReady: isLayerReady
 	)
@@ -1554,6 +1589,7 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 		) else (
 			(dotNetClass "System.IO.File").Move stagedGLB finalGLB
 		)
+		GCMatterportMarkGLBValidation exportJob.layerName finalGLB exportJob.validationFolder
 	) catch (failureReason = getCurrentException() as string)
 	with undo off (
 		try (
@@ -2603,6 +2639,8 @@ rcmenu GCMatterportLODContextMenu (
 	menuItem previewLODItem "Preview in Google Model Viewer"
 	menuItem previewPCLODItem "Preview in PlayCanvas Viewer"
 	menuItem liveMaterialsItem "Live Preview Materials..."
+	separator validationSeparator
+	menuItem validateGLBItem "Validate GLB"
 	separator sceneFolderSeparator
 	menuItem openSceneFolderItem "Open Scene Folder"
 	separator previewSeparator
@@ -2613,11 +2651,13 @@ rcmenu GCMatterportLODContextMenu (
 	on GCMatterportLODContextMenu open do (
 		previewLODItem.enabled = _rExportGCMatterportGLBConverter.canPreviewLOD()
 		previewPCLODItem.enabled = previewLODItem.enabled
+		validateGLBItem.enabled = _rExportGCMatterportGLBConverter.canValidateSelectedGLBs()
 		copyPropertiesItem.enabled = _rExportGCMatterportGLBConverter.canCopyLODProperties()
 		pastePropertiesItem.enabled = _rExportGCMatterportGLBConverter.canPasteLODProperties()
 	)
 	on previewLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD()
 	on previewPCLODItem picked do _rExportGCMatterportGLBConverter.previewSelectedLOD usePlayCanvas: true
+	on validateGLBItem picked do _rExportGCMatterportGLBConverter.validateSelectedGLBs()
 	on liveMaterialsItem picked do (try (destroyDialog GCMatterportLiveRollout) catch(); createDialog GCMatterportLiveRollout 344 110)
 	on openSceneFolderItem picked do GCMatterportOpenSceneFolder()
 	on copyPropertiesItem picked do _rExportGCMatterportGLBConverter.copyLODProperties()
@@ -2805,7 +2845,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
 
 	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
-	checkbox cbxShowValidationReport "Show validation report" checked: true width: 310 align: #center toolTip: "Open the Khronos validation report after export. GLB validation always runs."
+	checkbox cbxShowValidationReport "Show validation report on errors" checked: true enabled: false width: 310 align: #center toolTip: "Always open the report when validation finds errors or fails. Successful reports are saved without opening."
 
 	local isExportingLODs = false
 	local isRenderingAO = false
@@ -3210,6 +3250,52 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	on btnRenderAO pressed do renderSelectedAO()
 
 
+	fn canValidateSelectedGLBs = (
+		if (isRenderingAO or isExportingLODs or maxFilePath == "" or maxFileName == "") do return false
+		local selectedRows = lbxLODs.selection as array
+		if (selectedRows.count == 0) do return false
+		for rowIndex in selectedRows do (
+			if (rowIndex < 1 or rowIndex > lodEntries.count) do return false
+			if (not GCMatterportLODHasGLB lodEntries[rowIndex].layerName) do return false
+		)
+		return true
+	)
+
+	fn validateSelectedGLBs = (
+		if (not canValidateSelectedGLBs()) do return false
+		local selectedLayerNames = for rowIndex in (lbxLODs.selection as array) collect lodEntries[rowIndex].layerName
+		local exportFolder = maxFilePath + "export\\"
+		local validationFolder = exportFolder + "validation\\" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
+		local previousTimerActive = tmrLODRefresh.active
+		local failureReason = undefined
+		isExportingLODs = true
+		tmrLODRefresh.active = false
+		try (
+			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("clean \"" + exportFolder + "validation\"") GCMatterportRuntimeFolder operationLabel: "Previous validation report cleanup"
+			(dotNetClass "System.IO.Directory").CreateDirectory validationFolder
+			local validationFiles = ""
+			for layerName in selectedLayerNames do validationFiles += (GCMatterportExportFileName layerName) + "\n"
+			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "files.txt") validationFiles (dotNetObject "System.Text.UTF8Encoding" false)
+			local reportLines = ""
+			for layerName in selectedLayerNames do (
+				local filePath = exportFolder + (GCMatterportExportFileName layerName)
+				GCMatterportClearGLBValidation layerName
+				try (
+					reportLines += layerName + ": " + (GCMatterportValidateGLB filePath validationFolder) + "\n"
+					GCMatterportMarkGLBValidation layerName filePath validationFolder
+				) catch (reportLines += layerName + ": " + (getCurrentException() as string) + "\n")
+			)
+			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") reportLines (dotNetObject "System.Text.UTF8Encoding" false)
+			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
+			ShellLaunch (validationFolder + "index.html") ""
+		) catch (failureReason = getCurrentException() as string)
+		isExportingLODs = false
+		tmrLODRefresh.active = previousTimerActive
+		refreshLODs()
+		if (failureReason != undefined) do messageBox failureReason title: "Validate GLB" beep: false
+		return (failureReason == undefined)
+	)
+
 	fn batchExportLODs = (
 		if (isRenderingAO or isExportingLODs) do return false
 		local selectedLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
@@ -3277,7 +3363,8 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		try (
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") summaryText (dotNetObject "System.Text.UTF8Encoding" false)
 			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
-			if (cbxShowValidationReport.checked) do ShellLaunch (validationFolder + "index.html") ""
+			local validationReportState = (dotNetClass "System.IO.File").ReadAllText (validationFolder + "report-status.txt")
+			if (validationReportState == "error") do ShellLaunch (validationFolder + "index.html") ""
 		) catch (
 			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
 		)

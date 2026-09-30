@@ -58,7 +58,7 @@ details>summary{cursor:pointer;font-weight:600}summary:focus-visible,a:focus-vis
             if ((File.GetAttributes(resolved) & FileAttributes.ReparsePoint) != 0) continue;
             string manifest = Path.Combine(resolved, "files.txt");
             if (!File.Exists(manifest) || (File.GetAttributes(manifest) & FileAttributes.ReparsePoint) != 0 || Directory.GetDirectories(resolved).Length != 0) continue;
-            var ownedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "files.txt", "batch-summary.txt", "index.html" };
+            var ownedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "files.txt", "batch-summary.txt", "index.html", "report-status.txt" };
             bool safe = true;
             foreach (string filename in File.ReadAllLines(manifest)) {
                 if (filename.Length == 0) continue;
@@ -175,5 +175,6 @@ details>summary{cursor:pointer;font-weight:600}summary:focus-visible,a:focus-vis
         if (File.Exists(batchSummary)) body.Append("<details class='export-log'><summary>Export log</summary><pre>" + Html(File.ReadAllText(batchSummary)) + "</pre></details>");
         body.Append("</main></html>");
         File.WriteAllText(Path.Combine(folder, "index.html"), body.ToString(), Utf8);
+        File.WriteAllText(Path.Combine(folder, "report-status.txt"), state, Utf8);
     }
 }
