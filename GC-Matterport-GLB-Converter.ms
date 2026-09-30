@@ -83,6 +83,7 @@ GC-Matterport-GLB-Converter.ms=
 
 
 try(destroyDialog GCMatterportLiveRollout) catch()
+try(if floaterGCMatterportGLBConverter.dialogBar do cui.UnRegisterDialogBar floaterGCMatterportGLBConverter) catch()
 try(closeRolloutFloater floaterGCMatterportGLBConverter) catch()
 global floaterGCMatterportGLBConverter = newRolloutFloater "Matterport Converter" 360 740
 
@@ -4188,6 +4189,37 @@ fn GCMatterportApplyUpdate runtimeFolder stage updateFiles preparedFolders = (
     )
     return updateResult
 )
+rollout _rSettingsGCMatterportGLBConverter "Settings" category: 998 (
+	group "Dock window" (
+		checkbutton cbbDockLeft "Left" width: 150 across: 2 align: #left
+		checkbutton cbbDockRight "Right" width: 150 align: #right
+	)
+	fn setDockSide dockSide = (
+		if (findItem #(0, 1, 2) dockSide == 0) do dockSide = 0
+		if (dockSide != 0 and not floaterGCMatterportGLBConverter.dialogBar) do (
+			local floatingPosition = floaterGCMatterportGLBConverter.pos
+			'*'.add "x" floatingPosition.x
+			'*'.add "y" floatingPosition.y
+		)
+		if (floaterGCMatterportGLBConverter.dialogBar) do cui.UnRegisterDialogBar floaterGCMatterportGLBConverter
+		if (dockSide != 0) then (
+			cui.RegisterDialogBar floaterGCMatterportGLBConverter style: #(#cui_floatable, #cui_dock_vert, #cui_handles, #cui_max_sized, #style_toolwindow, #style_sysmenu)
+			cui.DockDialogBar floaterGCMatterportGLBConverter (if dockSide == 1 then #cui_dock_left else #cui_dock_right)
+		) else (
+			floaterGCMatterportGLBConverter.size = [360, 740]
+			local savedX = '*'.get "x"
+			local savedY = '*'.get "y"
+			if (savedX != "" and savedY != "") do floaterGCMatterportGLBConverter.pos = [savedX as integer, savedY as integer]
+		)
+		'*'.add "dockSide" dockSide
+		cbbDockLeft.checked = (dockSide == 1)
+		cbbDockRight.checked = (dockSide == 2)
+		return true
+	)
+	on cbbDockLeft changed isChecked do setDockSide (if isChecked then 1 else 0)
+	on cbbDockRight changed isChecked do setDockSide (if isChecked then 2 else 0)
+)
+
 rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 	group "Description" (
 		dotNetControl edtDescription "System.Windows.Forms.Textbox" align:#center height: 60
@@ -4344,10 +4376,11 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
     )
 
 	on _rAboutGCMatterportGLBConverter close do (
-		local p = floaterGCMatterportGLBConverter.pos
-		
-		'*'.add "x" p.x
-		'*'.add "y" p.y
+		if (('*'.get "dockSide" type: #int) == 0) do (
+			local p = floaterGCMatterportGLBConverter.pos
+			'*'.add "x" p.x
+			'*'.add "y" p.y
+		)
 	)	
 )
 
@@ -4355,5 +4388,7 @@ rollout _rAboutGCMatterportGLBConverter "About" category: 999 (
 local hasLODsAtStartup = ((GCMatterportGetData()).count > 0)
 addRollout _rBoilerplateGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: hasLODsAtStartup
 addRollout _rExportGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: (not hasLODsAtStartup)
+addRollout _rSettingsGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true
 addRollout _rAboutGCMatterportGLBConverter floaterGCMatterportGLBConverter rolledUp: true 
+_rSettingsGCMatterportGLBConverter.setDockSide ('*'.get "dockSide" type: #int)
 )
