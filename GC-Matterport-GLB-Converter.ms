@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.2
+VERSION = 1.4.3
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,9 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.3]
+* Changed: PlayCanvas sky environment rotation defaults to 0 degrees. =
 
 [1.4.2]
 * Improved: UV errors identify the LOD layer, object, material ID and affected face where available. =

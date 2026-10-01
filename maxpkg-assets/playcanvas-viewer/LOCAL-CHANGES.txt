@@ -7,3 +7,5 @@ Background color approximated from screenshot as RGB 192,192,192. Viewport follo
 TinyWeb localhost.exe is reused from the existing GC Tools Model Viewer distribution.
 
 Mouse wheel zoom: native CameraControls.wheelSpeed reduced from 0.06 to 0.02; pinch and orbit unchanged.
+
+Sky environment rotation defaults to 0 degrees.
