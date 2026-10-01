@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.3
+VERSION = 1.4.4
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,9 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.4]
+* Improved: AO render summaries label disabled materials as AO Disabled on a separate line. =
 
 [1.4.3]
 * Changed: PlayCanvas sky environment rotation defaults to 0 degrees. =
@@ -3367,7 +3370,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		refreshLODs()
 		tmrLODRefresh.active = previousTimerActive
 		redrawViews()
-		local summaryText = "AO rendered and assigned: " + (completedCount as string) + " of " + (selectedEntries.count as string) + ". Skipped: " + (skippedCount as string) + "."
+		local summaryText = "AO rendered and assigned: " + (completedCount as string) + " of " + (selectedEntries.count as string) + ".\nAO Disabled: " + (skippedCount as string) + "."
 		if (completedCount > 0) do summaryText += "\nImages: " + outputFolder
 		for reportLine in reportLines do summaryText += "\n" + reportLine
 		aoOperationTimer.Stop()
