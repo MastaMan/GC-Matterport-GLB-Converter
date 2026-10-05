@@ -96,6 +96,8 @@ glTF-Validator-LICENSE.txt=
 glTF-Validator-NOTICES.txt=
 GC-GLB-Validation.cs=
 GC-GLB-Validation.exe=
+GC-Texture-Convert.cs=
+GC-Texture-Convert.exe=
 gltfpack.exe=
 gltfpack_webgl.bat=
 model-viewer.zip=
@@ -1406,7 +1408,7 @@ rcmenu GCMatterportMaterialContextMenu (
 )
 
 
-struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), validationFolder, validationSummary)
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), convertAllTexturesToJPG = false, validationFolder, validationSummary)
 
 fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels = (
 	local converterPath = GCMatterportRuntimeFolder + "convert.exe"
@@ -1449,6 +1451,7 @@ fn GCMatterportBuildExportMaterial sceneNode = (
 )
 
 fn GCMatterportExportPreflight layerNames = (
+	local convertAllTexturesToJPG = (GCMatterportSceneProperties.getValue "GC.Matterport.ConvertAllTexturesToJPG" true) == true
 	local exportJobs = #()
 	local issues = #()
 	if (maxFilePath == "" or maxFileName == "") do append issues "Save the MAX scene first. Output belongs in the scene's export folder."
@@ -1545,10 +1548,10 @@ fn GCMatterportExportPreflight layerNames = (
 					append textureSizes (GCMatterportGetTextureSize sourceEntry)
 				)
 			)
-			if ((for sizePixels in textureSizes where sizePixels > 0 collect sizePixels).count > 0) do (
-				for runtimeFile in #("convert.exe", "jpegoptim.exe") where (not doesFileExist (GCMatterportRuntimeFolder + runtimeFile)) do append issues ("Missing runtime file: " + runtimeFile)
+			if (convertAllTexturesToJPG or (for sizePixels in textureSizes where sizePixels > 0 collect sizePixels).count > 0) do (
+				for runtimeFile in (if convertAllTexturesToJPG then #("convert.exe", "jpegoptim.exe", "GC-Texture-Convert.exe") else #("convert.exe", "jpegoptim.exe")) where (not doesFileExist (GCMatterportRuntimeFolder + runtimeFile)) do append issues ("Missing runtime file: " + runtimeFile)
 			)
-			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes)
+			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes convertAllTexturesToJPG: convertAllTexturesToJPG)
 		)
 	)
 	return #(exportJobs, issues, preflightWarnings)
@@ -1616,6 +1619,11 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			local intermediateGLTF = stagingFolder + "scene.gltf"
 			if (not exportFile intermediateGLTF #noPrompt selectedOnly: true using: GLTF_Export) do throw "Native glTF export failed or was cancelled."
 			if (not doesFileExist intermediateGLTF) do throw "Native glTF export produced no file."
+			if (exportJob.convertAllTexturesToJPG) do (
+				local textureConverter = GCMatterportRuntimeFolder + "GC-Texture-Convert.exe"
+				local conversionArguments = "\"" + intermediateGLTF + "\" \"" + GCMatterportRuntimeFolder + "convert.exe\" \"" + GCMatterportRuntimeFolder + "jpegoptim.exe\""
+				GCMatterportRunAOProcess textureConverter conversionArguments stagingFolder operationLabel: "Convert glTF textures to JPG"
+			)
 			local batchPath = GCMatterportRuntimeFolder + "gltfpack_webgl.bat"
 			-- Per-material caps have already been applied; do not clamp overrides back to the LOD cap.
 			local packTextureLimit = if hasTextureOverrides then 4096 else exportJob.textureLimit
@@ -4369,6 +4377,20 @@ fn GCMatterportApplyUpdate runtimeFolder stage updateFiles preparedFolders = (
     return updateResult
 )
 rollout _rSettingsGCMatterportGLBConverter "Settings" category: 998 (
+	group "Textures" (
+		checkbox cbxConvertAllTexturesToJPG "Convert all textures to JPG" checked: true width: 310 align: #center
+		label lblJPEGAlpha "JPG removes alpha. Disable to preserve\nPNG transparency." width: 310 height: 32 align: #center
+	)
+	fn refreshTextureConversionSetting = (
+		local convertTextures = GCMatterportSceneProperties.getValue "GC.Matterport.ConvertAllTexturesToJPG" true
+		cbxConvertAllTexturesToJPG.checked = if (classOf convertTextures == BooleanClass) then convertTextures else true
+		cbxConvertAllTexturesToJPG.enabled = (not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
+		return cbxConvertAllTexturesToJPG.checked
+	)
+	on cbxConvertAllTexturesToJPG changed isChecked do GCMatterportSceneProperties.setValue "GC.Matterport.ConvertAllTexturesToJPG" isChecked
+	on _rSettingsGCMatterportGLBConverter open do refreshTextureConversionSetting()
+	timer tmrTextureSettings interval: 500 active: true
+	on tmrTextureSettings tick do refreshTextureConversionSetting()
 	group "Dock window" (
 		checkbutton cbbDockLeft "Left" width: 150 across: 2 align: #left
 		checkbutton cbbDockRight "Right" width: 150 align: #right
