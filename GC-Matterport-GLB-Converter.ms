@@ -2944,6 +2944,55 @@ rollout GCMatterportUVReportRollout "UV Operation Report" (
 	on btnCopy pressed do setClipBoardText txtReport.Text
 	on btnClose pressed do destroyDialog GCMatterportUVReportRollout
 )
+try (destroyDialog GCMatterportBatchReportRollout) catch()
+rollout GCMatterportBatchReportRollout "Batch Export Report" (
+	dotNetControl lblStatus "System.Windows.Forms.Label" pos: [12,12] width: 496 height: 38
+	dotNetControl txtReport "System.Windows.Forms.RichTextBox" pos: [12,60] width: 496 height: 262
+	button btnCopy "Copy Report" pos: [12,337] width: 120 height: 26
+	button btnClose "Close" pos: [388,337] width: 120 height: 26
+	fn showReport reportContent hasErrors = (
+		local drawingColor = dotNetClass "System.Drawing.Color"
+		lblStatus.Text = if hasErrors then "EXPORT INCOMPLETE" else "SUCCESS"
+		lblStatus.BackColor = if hasErrors then drawingColor.FromArgb 90 35 35 else drawingColor.FromArgb 30 75 48
+		lblStatus.ForeColor = drawingColor.FromArgb 245 245 245
+		lblStatus.TextAlign = (dotNetClass "System.Drawing.ContentAlignment").MiddleCenter
+		lblStatus.Font = dotNetObject "System.Drawing.Font" "Segoe UI" 12.0 ((dotNetClass "System.Drawing.FontStyle").Bold)
+		txtReport.ReadOnly = true
+		txtReport.WordWrap = true
+		txtReport.DetectUrls = false
+		txtReport.ScrollBars = (dotNetClass "System.Windows.Forms.RichTextBoxScrollBars").Vertical
+		txtReport.BorderStyle = (dotNetClass "System.Windows.Forms.BorderStyle").None
+		local reportBackground = (colorMan.getColor #rollupTitleFace) * 255
+		local reportForeground = (colorMan.getColor #rollupTitleText) * 255
+		txtReport.BackColor = drawingColor.FromArgb (reportBackground.x as integer) (reportBackground.y as integer) (reportBackground.z as integer)
+		txtReport.ForeColor = drawingColor.FromArgb (reportForeground.x as integer) (reportForeground.y as integer) (reportForeground.z as integer)
+		txtReport.Font = dotNetObject "System.Drawing.Font" "Segoe UI" 9.0
+		txtReport.Clear()
+		for reportLine in (filterString reportContent "\n" splitEmptyTokens: true) do (
+			txtReport.SelectionStart = txtReport.TextLength
+			txtReport.SelectionLength = 0
+			txtReport.SelectionColor = txtReport.ForeColor
+			if (matchPattern reportLine pattern: "SUCCESS:*") do txtReport.SelectionColor = drawingColor.FromArgb 80 185 110
+			if (matchPattern reportLine pattern: "ERROR:*") do txtReport.SelectionColor = drawingColor.FromArgb 235 100 85
+			if (matchPattern reportLine pattern: "WARNING:*" or matchPattern reportLine pattern: "NOT STARTED:*") do txtReport.SelectionColor = drawingColor.FromArgb 225 180 65
+			txtReport.AppendText (reportLine + "\r\n")
+		)
+		txtReport.Select 0 0
+		return true
+	)
+	on btnCopy pressed do setClipBoardText txtReport.Text
+	on btnClose pressed do destroyDialog GCMatterportBatchReportRollout
+)
+fn GCMatterportShowBatchReport summaryContent reportEntries hasErrors = (
+	local reportContent = summaryContent + "\n"
+	for reportEntry in reportEntries do (
+		for reportLine in (filterString reportEntry[2] "\n" splitEmptyTokens: true) do reportContent += "\n" + reportEntry[1] + ": " + reportLine
+	)
+	try (destroyDialog GCMatterportBatchReportRollout) catch()
+	createDialog GCMatterportBatchReportRollout 520 375 style: #(#style_titlebar, #style_border, #style_sysmenu)
+	GCMatterportBatchReportRollout.showReport reportContent hasErrors
+	return true
+)
 rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (	
 	label lblCompleteStatus "Complete status: [GLB] [AO]" align: #left width: 326 toolTip: "GLB: exported file exists. AO: all enabled material IDs have AO maps. Check: one object with valid glTF materials."
 	group "LODs" (
@@ -3519,11 +3568,25 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		if (isRenderingAO or isExportingLODs) do return false
 		local selectedLayerNames = for rowIndex in (lbxLODs.selection as array) where (rowIndex >= 1 and rowIndex <= lodEntries.count) collect lodEntries[rowIndex].layerName
 		if (selectedLayerNames.count == 0) do return false
-		local preflightResult = GCMatterportExportPreflight selectedLayerNames
+		local batchEntries = #()
+		local preflightResult = undefined
+		try (preflightResult = GCMatterportExportPreflight selectedLayerNames) catch (
+			append batchEntries #("ERROR", "Preflight failed: " + (getCurrentException() as string))
+			for layerName in selectedLayerNames do append batchEntries #("NOT STARTED", layerName + ": preflight did not finish.")
+			GCMatterportShowBatchReport "Nothing was exported." batchEntries true
+			return false
+		)
+		for warningLine in preflightResult[3] do append batchEntries #("WARNING", warningLine)
 		if (preflightResult[2].count > 0) do (
 			local messageContent = "Nothing was exported. Fix these issues in the selected LODs:\n"
-			for issue in preflightResult[2] do messageContent += "\n" + issue
-			messageBox messageContent title: "Batch Export LODs" beep: false
+			for issue in preflightResult[2] do append batchEntries #("ERROR", issue)
+			for layerName in selectedLayerNames do (
+				local hasLODProblem = false
+				for issue in preflightResult[2] where ((findString issue (layerName + ":")) == 1 or (findString issue (layerName + " / ")) == 1) do hasLODProblem = true
+				if hasLODProblem then append batchEntries #("ERROR", layerName + ": not exported; failed preflight (see reasons above).")
+				else append batchEntries #("NOT STARTED", layerName + ": batch blocked by preflight errors; no export attempted.")
+			)
+			GCMatterportShowBatchReport messageContent batchEntries true
 			return false
 		)
 		local exportJobs = preflightResult[1]
@@ -3539,29 +3602,43 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			(dotNetClass "System.IO.Directory").CreateDirectory validationFolder
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "files.txt") validationFiles (dotNetObject "System.Text.UTF8Encoding" false)
 		) catch (
-			messageBox ("Could not create the validation report folder.\n" + (getCurrentException() as string)) title: "Batch Export LODs" beep: false
+			append batchEntries #("ERROR", "Could not prepare the validation report folder.\n" + (getCurrentException() as string))
+			for layerName in selectedLayerNames do append batchEntries #("NOT STARTED", layerName + ": export preparation failed.")
+			GCMatterportShowBatchReport "Nothing was exported." batchEntries true
 			return false
 		)
 		local completedCount = 0
 		local reportLines = #()
+		local attemptedCount = 0
+		local activeLayerName = undefined
 		local previousTimerActive = tmrLODRefresh.active
 		local controlStates = for uiControl in #(lbxLODs, lbxMaterials, btnRefresList, btnAddToLOD, btnAssignDefaultMaterials, spnDefaultMaterialCount, btnSelectAllMaterials, btnTransferUV, btnFlattenUV, cbxUseCoronaAO, cpAOColor, cbxAOOverride, ddlAOResolution, spnAOPasses, spnAOSize, cbxAODenoise) collect #(uiControl, uiControl.enabled)
 		isExportingLODs = true
 		tmrLODRefresh.active = false
-		refreshAOSettings()
-		for controlState in controlStates do controlState[1].enabled = false
 		try (
+			refreshAOSettings()
+			for controlState in controlStates do controlState[1].enabled = false
 			for exportJob in exportJobs do (
+				attemptedCount += 1
+				activeLayerName = exportJob.layerName
 				local failureReason = GCMatterportExportOneLOD exportJob exportFolder
 				if (failureReason == undefined) then (
 					completedCount += 1
+					append batchEntries #("SUCCESS", exportJob.layerName + ": exported " + exportJob.fileName)
+					activeLayerName = undefined
 				) else (
 					append reportLines (exportJob.layerName + ": " + failureReason)
+					append batchEntries #("ERROR", exportJob.layerName + ": not exported.\n" + failureReason)
 					-- Stop on operational failure/cancellation; preflight already checked the whole set.
 					exit
 				)
 			)
-		) catch (append reportLines (getCurrentException() as string))
+		) catch (
+			local failureContent = (if activeLayerName == undefined then "Batch operation" else activeLayerName + ": not exported") + ": " + (getCurrentException() as string)
+			append reportLines failureContent
+			append batchEntries #("ERROR", failureContent)
+		)
+		for jobIndex in (attemptedCount + 1) to exportJobs.count do append batchEntries #("NOT STARTED", exportJobs[jobIndex].layerName + ": batch stopped before this LOD; no export attempted.")
 		for controlState in controlStates do controlState[1].enabled = controlState[2]
 		isExportingLODs = false
 		aoDisplaySignature = undefined
@@ -3573,7 +3650,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		summaryText += "\nWebGL GLB exported: " + (completedCount as string) + " of " + (exportJobs.count as string) + "."
 		if (reportLines.count > 0) do (
 			summaryText += "\nFailed or cancelled: " + (reportLines.count as string) + "."
-			local notAttemptedCount = amax 0 (exportJobs.count - completedCount - reportLines.count)
+			local notAttemptedCount = amax 0 (exportJobs.count - attemptedCount)
 			if (notAttemptedCount > 0) do summaryText += " Not attempted: " + (notAttemptedCount as string) + "."
 		)
 		if (completedCount > 0) do summaryText += "\n\nOutput: " + exportFolder
@@ -3595,15 +3672,17 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		) catch (
 			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
 		)
+		GCMatterportShowBatchReport summaryText batchEntries (not allCompleted)
 		if (completedCount > 0) then (
 			if (queryBox (summaryText + "\n\nOpen this folder?") title: "Batch Export LODs" beep: false defaultButton: 2) do (
 				try (
 					if (not doesDirectoryExist exportFolder) do throw "The export folder no longer exists."
 					ShellLaunch "explorer.exe" ("\"" + (trimRight exportFolder "\\") + "\"")
-				) catch (messageBox ("Could not open the export folder.\n" + (getCurrentException() as string)) title: "Batch Export LODs" beep: false)
+				) catch (
+					append batchEntries #("ERROR", "Could not open the export folder.\n" + (getCurrentException() as string))
+					GCMatterportShowBatchReport summaryText batchEntries true
+				)
 			)
-		) else (
-			messageBox summaryText title: "Batch Export LODs" beep: false
 		)
 		return allCompleted
 	)
