@@ -1408,9 +1408,9 @@ rcmenu GCMatterportMaterialContextMenu (
 )
 
 
-struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), convertAllTexturesToJPG = false, validationFolder, validationSummary)
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), convertAllTexturesToJPG = false, textureWarnings = #(), validationFolder, validationSummary)
 
-fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels = (
+fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels preservePNG: false = (
 	local converterPath = GCMatterportRuntimeFolder + "convert.exe"
 	if (not doesFileExist converterPath) do throw "Missing ImageMagick convert.exe. Restore the converter package."
 	local resizedPNG = outputStem + ".png"
@@ -1421,7 +1421,7 @@ fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels = (
 	GCMatterportRunAOProcess converterPath ("\"" + resizedPNG + "\" -format \"%[opaque]\" \"info:" + opaqueReport + "\"") outputFolder operationLabel: "Texture alpha check"
 	local isOpaque = (toLower (trimRight (trimLeft ((dotNetClass "System.IO.File").ReadAllText opaqueReport)))) == "true"
 	local resultImage = resizedPNG
-	if (isOpaque) do (
+	if (isOpaque and not preservePNG) do (
 		resultImage = outputStem + ".jpg"
 		GCMatterportRunAOProcess converterPath ("\"" + resizedPNG + "\" -alpha off -quality 100 \"" + resultImage + "\"") outputFolder operationLabel: "Texture JPEG conversion"
 		GCMatterportOptimizeAO resultImage
@@ -1448,6 +1448,48 @@ fn GCMatterportBuildExportMaterial sceneNode = (
 		exportParent.materialList[slotIndex] = exportMaterial
 	)
 	return exportParent
+)
+
+fn GCMatterportSquareTextureIssue texturePath dimensionCache = (
+	local cacheKey = toLower texturePath
+	for cacheEntry in dimensionCache where cacheEntry[1] == cacheKey do return cacheEntry[2]
+	local issueContent = undefined
+	try (
+		local bitmapInfo = getBitmapInfo texturePath
+		if (bitmapInfo == undefined or bitmapInfo.count < 4) do throw "Image header could not be read."
+		local pixelWidth = bitmapInfo[3]
+		local pixelHeight = bitmapInfo[4]
+		if (pixelWidth <= 0 or pixelHeight <= 0) do throw "Image dimensions are invalid."
+		if (pixelWidth != pixelHeight) do issueContent = "Texture must be square; found " + (pixelWidth as string) + " x " + (pixelHeight as string) + ": " + texturePath
+	) catch (issueContent = "Cannot read texture dimensions: " + texturePath + ". " + (getCurrentException() as string))
+	append dimensionCache #(cacheKey, issueContent)
+	return issueContent
+)
+
+fn GCMatterportNormalizedTextureSize sourcePixels limitPixels = (
+	local targetPixels = sourcePixels
+	if (sourcePixels >= 512) do (
+		for allowedPixels in #(512, 1024, 2048, 4096) where (allowedPixels <= sourcePixels) do targetPixels = allowedPixels
+	)
+	return amin targetPixels limitPixels
+)
+
+fn GCMatterportPartitionTextureJobs exportJobs = (
+	local acceptedJobs = #()
+	local rejectedLODs = #()
+	local dimensionCache = #()
+	for exportJob in exportJobs do (
+		local textureIssues = #()
+		for bitmapMap in (getClassInstances Bitmaptexture target: exportJob.exportMaterial) do (
+			local texturePath = mapPaths.getFullFilePath bitmapMap.filename
+			if (texturePath == undefined or texturePath == "") do texturePath = bitmapMap.filename
+			local textureIssue = GCMatterportSquareTextureIssue texturePath dimensionCache
+			if (textureIssue != undefined) do appendIfUnique textureIssues (exportJob.layerName + ": " + textureIssue)
+		)
+		if (textureIssues.count == 0) then append acceptedJobs exportJob
+		else append rejectedLODs #(exportJob.layerName, textureIssues)
+	)
+	return #(acceptedJobs, rejectedLODs)
 )
 
 fn GCMatterportExportPreflight layerNames = (
@@ -1554,7 +1596,8 @@ fn GCMatterportExportPreflight layerNames = (
 			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes convertAllTexturesToJPG: convertAllTexturesToJPG)
 		)
 	)
-	return #(exportJobs, issues, preflightWarnings)
+	local texturePartition = GCMatterportPartitionTextureJobs (for exportJob in exportJobs where exportJob.exportMaterial != undefined collect exportJob)
+	return #(texturePartition[1], issues, preflightWarnings, texturePartition[2])
 )
 
 fn GCMatterportValidateGLB filePath reportFolder = (
@@ -1611,7 +1654,14 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 					local sourceImage = mapPaths.getFullFilePath bitmapMap.filename
 					local copiedImage = mapsFolder + (mapIndex as string) + "_source" + (getFilenameType sourceImage)
 					if (not copyFile sourceImage copiedImage) do throw ("Cannot copy the referenced texture: " + sourceImage)
-					if (hasTextureOverrides) do copiedImage = GCMatterportResizeExportTexture copiedImage (mapsFolder + (mapIndex as string)) sizePixels
+					local sourceInfo = getBitmapInfo copiedImage
+					if (sourceInfo == undefined) do throw ("Cannot read exported texture: " + sourceImage)
+					if (sourceInfo[3] != sourceInfo[4]) do throw ("Texture changed after preflight and is not square: " + sourceImage)
+					local normalizedSize = GCMatterportNormalizedTextureSize sourceInfo[3] sizePixels
+					if (hasTextureOverrides or normalizedSize < sourceInfo[3]) do copiedImage = GCMatterportResizeExportTexture copiedImage (mapsFolder + (mapIndex as string)) normalizedSize preservePNG: (not hasTextureOverrides)
+					local resultInfo = getBitmapInfo copiedImage
+					if (resultInfo == undefined or resultInfo[3] != normalizedSize or resultInfo[4] != normalizedSize) do throw ("Texture resize did not produce the required dimensions: " + sourceImage)
+					if (resultInfo[3] < sourceInfo[3]) do appendIfUnique exportJob.textureWarnings (exportJob.layerName + ": " + sourceImage + " | " + (sourceInfo[3] as string) + " x " + (sourceInfo[4] as string) + " -> " + (resultInfo[3] as string) + " x " + (resultInfo[4] as string) + " (export copy)")
 					bitmapMap.filename = copiedImage
 				)
 			)
@@ -3577,10 +3627,16 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			return false
 		)
 		for warningLine in preflightResult[3] do append batchEntries #("WARNING", warningLine)
+		local rejectedLODs = preflightResult[4]
+		local rejectedNames = for rejectedLOD in rejectedLODs collect rejectedLOD[1]
+		for rejectedLOD in rejectedLODs do (
+			append batchEntries #("ERROR", rejectedLOD[1] + ": not exported; texture preflight failed.")
+			for textureIssue in rejectedLOD[2] do append batchEntries #("ERROR", textureIssue)
+		)
 		if (preflightResult[2].count > 0) do (
 			local messageContent = "Nothing was exported. Fix these issues in the selected LODs:\n"
 			for issue in preflightResult[2] do append batchEntries #("ERROR", issue)
-			for layerName in selectedLayerNames do (
+			for layerName in selectedLayerNames where (findItem rejectedNames layerName == 0) do (
 				local hasLODProblem = false
 				for issue in preflightResult[2] where ((findString issue (layerName + ":")) == 1 or (findString issue (layerName + " / ")) == 1) do hasLODProblem = true
 				if hasLODProblem then append batchEntries #("ERROR", layerName + ": not exported; failed preflight (see reasons above).")
@@ -3590,6 +3646,10 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			return false
 		)
 		local exportJobs = preflightResult[1]
+		if (exportJobs.count == 0) do (
+			GCMatterportShowBatchReport ("Nothing was exported. Texture preflight failed for " + (rejectedLODs.count as string) + " LOD(s).") batchEntries true
+			return false
+		)
 		local exportFolder = maxFilePath + "export\\"
 		local validationFolder = exportFolder + "validation\\" + ((dotNetClass "System.DateTime").Now.ToString "yyyyMMdd-HHmmss") + "-" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
 		local validationFiles = ""
@@ -3603,7 +3663,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "files.txt") validationFiles (dotNetObject "System.Text.UTF8Encoding" false)
 		) catch (
 			append batchEntries #("ERROR", "Could not prepare the validation report folder.\n" + (getCurrentException() as string))
-			for layerName in selectedLayerNames do append batchEntries #("NOT STARTED", layerName + ": export preparation failed.")
+			for exportJob in exportJobs do append batchEntries #("NOT STARTED", exportJob.layerName + ": export preparation failed.")
 			GCMatterportShowBatchReport "Nothing was exported." batchEntries true
 			return false
 		)
@@ -3639,15 +3699,25 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			append batchEntries #("ERROR", failureContent)
 		)
 		for jobIndex in (attemptedCount + 1) to exportJobs.count do append batchEntries #("NOT STARTED", exportJobs[jobIndex].layerName + ": batch stopped before this LOD; no export attempted.")
+		for exportJob in exportJobs do (
+			for textureWarning in exportJob.textureWarnings do append batchEntries #("WARNING", textureWarning)
+		)
 		for controlState in controlStates do controlState[1].enabled = controlState[2]
 		isExportingLODs = false
 		aoDisplaySignature = undefined
 		refreshLODs()
 		tmrLODRefresh.active = previousTimerActive
 		redrawViews()
-		local allCompleted = (completedCount == exportJobs.count and reportLines.count == 0)
+		local allCompleted = (completedCount == selectedLayerNames.count and reportLines.count == 0)
 		local summaryText = if allCompleted then "Batch export completed." else "Batch export stopped before completion."
-		summaryText += "\nWebGL GLB exported: " + (completedCount as string) + " of " + (exportJobs.count as string) + "."
+		summaryText += "\nWebGL GLB exported: " + (completedCount as string) + " of " + (selectedLayerNames.count as string) + "."
+		if (rejectedLODs.count > 0) do summaryText += "\nRejected by texture preflight: " + (rejectedLODs.count as string) + "."
+		for rejectedLOD in rejectedLODs do (
+			for textureIssue in rejectedLOD[2] do summaryText += "\n" + textureIssue
+		)
+		for exportJob in exportJobs do (
+			for textureWarning in exportJob.textureWarnings do summaryText += "\nWarning: " + textureWarning
+		)
 		if (reportLines.count > 0) do (
 			summaryText += "\nFailed or cancelled: " + (reportLines.count as string) + "."
 			local notAttemptedCount = amax 0 (exportJobs.count - attemptedCount)
