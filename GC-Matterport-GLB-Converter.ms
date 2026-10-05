@@ -1408,7 +1408,7 @@ rcmenu GCMatterportMaterialContextMenu (
 )
 
 
-struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), convertAllTexturesToJPG = false, textureWarnings = #(), validationFolder, validationSummary)
+struct GCMatterportExportJob (layerName, nodeRef, fileName, textureLimit, exportMaterial, textureSizes = #(), convertAllTexturesToJPG = false, reduceToStandardSizes = true, runValidation = true, textureWarnings = #(), validationFolder, validationSummary)
 
 fn GCMatterportResizeExportTexture sourceImage outputStem sizePixels preservePNG: false = (
 	local converterPath = GCMatterportRuntimeFolder + "convert.exe"
@@ -1466,9 +1466,20 @@ fn GCMatterportSquareTextureIssue texturePath dimensionCache = (
 	return issueContent
 )
 
-fn GCMatterportNormalizedTextureSize sourcePixels limitPixels = (
+fn GCMatterportPersistentTextureSetting configKey legacySceneKey = (
+	local savedSetting = '*'.get configKey
+	if (savedSetting == "true") do return true
+	if (savedSetting == "false") do return false
+	-- One-time migration: an existing user preference always wins over scene metadata.
+	local legacySetting = GCMatterportSceneProperties.getValue legacySceneKey true
+	local initialSetting = if (classOf legacySetting == BooleanClass) then legacySetting else true
+	if (not ('*'.add configKey initialSetting)) do throw ("Could not save converter setting: " + configKey)
+	return initialSetting
+)
+
+fn GCMatterportNormalizedTextureSize sourcePixels limitPixels reduceToStandardSizes: true = (
 	local targetPixels = sourcePixels
-	if (sourcePixels >= 512) do (
+	if (reduceToStandardSizes and sourcePixels >= 512) do (
 		for allowedPixels in #(512, 1024, 2048, 4096) where (allowedPixels <= sourcePixels) do targetPixels = allowedPixels
 	)
 	return amin targetPixels limitPixels
@@ -1493,12 +1504,14 @@ fn GCMatterportPartitionTextureJobs exportJobs = (
 )
 
 fn GCMatterportExportPreflight layerNames = (
-	local convertAllTexturesToJPG = (GCMatterportSceneProperties.getValue "GC.Matterport.ConvertAllTexturesToJPG" true) == true
+	local convertAllTexturesToJPG = GCMatterportPersistentTextureSetting "convertAllTexturesToJPG" "GC.Matterport.ConvertAllTexturesToJPG"
+	local reduceToStandardSizes = GCMatterportPersistentTextureSetting "reduceToStandardTextureSizes" "GC.Matterport.ReduceToStandardTextureSizes"
+	local runValidation = GCMatterportPersistentTextureSetting "runGLBValidation" "GC.Matterport.RunGLBValidation"
 	local exportJobs = #()
 	local issues = #()
 	if (maxFilePath == "" or maxFileName == "") do append issues "Save the MAX scene first. Output belongs in the scene's export folder."
 	if (GLTF_Export == undefined or (findItem exporterPlugin.classes GLTF_Export) == 0) do append issues "The native glTF exporter is unavailable. Install or enable the 3ds Max glTF exporter."
-	for fileName in #("gltfpack.exe", "gltfpack_webgl.bat", "gltf_validator.exe", "GC-GLB-Validation.exe") where (not doesFileExist (GCMatterportRuntimeFolder + fileName)) do append issues ("Missing runtime file: " + fileName + ". Restore it beside the converter script.")
+	for fileName in (if runValidation then #("gltfpack.exe", "gltfpack_webgl.bat", "gltf_validator.exe", "GC-GLB-Validation.exe") else #("gltfpack.exe", "gltfpack_webgl.bat")) where (not doesFileExist (GCMatterportRuntimeFolder + fileName)) do append issues ("Missing runtime file: " + fileName + ". Restore it beside the converter script.")
 	for folderPath in #(maxFilePath, GCMatterportRuntimeFolder) do (
 		for forbiddenPart in #("%", ";", "\r", "\n") where (findString folderPath forbiddenPart != undefined) do append issues "The WebGL batch pipeline requires scene/script paths without %, semicolons or line breaks."
 	)
@@ -1593,7 +1606,7 @@ fn GCMatterportExportPreflight layerNames = (
 			if (convertAllTexturesToJPG or (for sizePixels in textureSizes where sizePixels > 0 collect sizePixels).count > 0) do (
 				for runtimeFile in (if convertAllTexturesToJPG then #("convert.exe", "jpegoptim.exe", "GC-Texture-Convert.exe") else #("convert.exe", "jpegoptim.exe")) where (not doesFileExist (GCMatterportRuntimeFolder + runtimeFile)) do append issues ("Missing runtime file: " + runtimeFile)
 			)
-			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes convertAllTexturesToJPG: convertAllTexturesToJPG)
+			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes convertAllTexturesToJPG: convertAllTexturesToJPG reduceToStandardSizes: reduceToStandardSizes runValidation: runValidation)
 		)
 	)
 	local texturePartition = GCMatterportPartitionTextureJobs (for exportJob in exportJobs where exportJob.exportMaterial != undefined collect exportJob)
@@ -1657,7 +1670,7 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 					local sourceInfo = getBitmapInfo copiedImage
 					if (sourceInfo == undefined) do throw ("Cannot read exported texture: " + sourceImage)
 					if (sourceInfo[3] != sourceInfo[4]) do throw ("Texture changed after preflight and is not square: " + sourceImage)
-					local normalizedSize = GCMatterportNormalizedTextureSize sourceInfo[3] sizePixels
+					local normalizedSize = GCMatterportNormalizedTextureSize sourceInfo[3] sizePixels reduceToStandardSizes: exportJob.reduceToStandardSizes
 					if (hasTextureOverrides or normalizedSize < sourceInfo[3]) do copiedImage = GCMatterportResizeExportTexture copiedImage (mapsFolder + (mapIndex as string)) normalizedSize preservePNG: (not hasTextureOverrides)
 					local resultInfo = getBitmapInfo copiedImage
 					if (resultInfo == undefined or resultInfo[3] != normalizedSize or resultInfo[4] != normalizedSize) do throw ("Texture resize did not produce the required dimensions: " + sourceImage)
@@ -1681,15 +1694,18 @@ fn GCMatterportExportOneLOD exportJob exportFolder = (
 			local commandExecutable = (dotNetClass "System.Environment").SystemDirectory + "\\cmd.exe"
 			GCMatterportRunAOProcess commandExecutable commandLine GCMatterportRuntimeFolder operationLabel: "WebGL export"
 		)
-		if (exportJob.validationFolder == undefined) do exportJob.validationFolder = exportFolder + "validation\\" + runToken + "\\"
-		exportJob.validationSummary = GCMatterportValidateGLB stagedGLB exportJob.validationFolder
-		-- Publish only a validated GLB. A failed export never deletes an existing result.
+		if exportJob.runValidation then (
+			if (exportJob.validationFolder == undefined) do exportJob.validationFolder = exportFolder + "validation\\" + runToken + "\\"
+			exportJob.validationSummary = GCMatterportValidateGLB stagedGLB exportJob.validationFolder
+		) else exportJob.validationSummary = "Validation skipped (disabled in Settings)."
+		-- Publish after optional validation. A failed export never deletes an existing result.
 		if (doesFileExist finalGLB) then (
 			(dotNetClass "System.IO.File").Replace stagedGLB finalGLB (stagingFolder + "previous.glb")
 		) else (
 			(dotNetClass "System.IO.File").Move stagedGLB finalGLB
 		)
-		GCMatterportMarkGLBValidation exportJob.layerName finalGLB exportJob.validationFolder
+		if exportJob.runValidation then GCMatterportMarkGLBValidation exportJob.layerName finalGLB exportJob.validationFolder
+		else GCMatterportClearGLBValidation exportJob.layerName
 	) catch (failureReason = getCurrentException() as string)
 	with undo off (
 		try (
@@ -3083,7 +3099,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	button btnRenderAO "Render AO for Selected IDs (0)" width: 310 align: #center enabled: false
 
 	button btnBatchExport "Batch Export LODs (0)" width: 310 height: 36 offset: [0, 8] align: #center enabled: false
-	checkbox cbxShowValidationReport "Show validation report on errors" checked: true width: 310 align: #center toolTip: "Open the report on validation errors. Saved with this scene. GLB validation always runs."
+	checkbox cbxShowValidationReport "Show validation report on errors" checked: true width: 310 align: #center toolTip: "Open the report on validation errors. Saved with this scene. GLB validation is controlled in Settings."
 
 	local isExportingLODs = false
 	local isRenderingAO = false
@@ -3650,6 +3666,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			GCMatterportShowBatchReport ("Nothing was exported. Texture preflight failed for " + (rejectedLODs.count as string) + " LOD(s).") batchEntries true
 			return false
 		)
+		local runValidation = exportJobs[1].runValidation
 		local exportFolder = maxFilePath + "export\\"
 		local validationFolder = exportFolder + "validation\\" + ((dotNetClass "System.DateTime").Now.ToString "yyyyMMdd-HHmmss") + "-" + ((dotNetClass "System.Guid").NewGuid()).ToString("N") + "\\"
 		local validationFiles = ""
@@ -3657,7 +3674,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			exportJob.validationFolder = validationFolder
 			validationFiles += exportJob.fileName + "\n"
 		)
-		try (
+		if runValidation do try (
 			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("clean \"" + exportFolder + "validation\"") GCMatterportRuntimeFolder operationLabel: "Previous validation report cleanup"
 			(dotNetClass "System.IO.Directory").CreateDirectory validationFolder
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "files.txt") validationFiles (dotNetObject "System.Text.UTF8Encoding" false)
@@ -3727,7 +3744,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		for reportLine in reportLines do summaryText += "\n" + reportLine
 		for exportJob in exportJobs where (exportJob.validationSummary != undefined) do summaryText += "\n" + exportJob.fileName + ": " + exportJob.validationSummary
 		for warningLine in preflightResult[3] do summaryText += "\nWarning: " + warningLine
-		try (
+		if runValidation then (try (
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") summaryText (dotNetObject "System.Text.UTF8Encoding" false)
 			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
 			local validationReportState = (dotNetClass "System.IO.File").ReadAllText (validationFolder + "report-status.txt")
@@ -3741,6 +3758,9 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 			if (validationReportState == "error" and cbxShowValidationReport.checked) do ShellLaunch (validationFolder + "index.html") ""
 		) catch (
 			summaryText += "\nCould not open the validation report: " + (getCurrentException() as string)
+		)
+		) else (
+			summaryText = (if allCompleted then "SUCCESS: Export completed.\nValidation skipped (disabled in Settings).\n\n" else "Validation skipped (disabled in Settings).\n\n") + summaryText
 		)
 		GCMatterportShowBatchReport summaryText batchEntries (not allCompleted)
 		if (completedCount > 0) then (
@@ -4403,6 +4423,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 	fn refreshValidationReportSetting = (
 		local showReport = GCMatterportSceneProperties.getValue "GC.Matterport.ShowValidationReportOnErrors" true
 		cbxShowValidationReport.checked = if (classOf showReport == BooleanClass) then showReport else true
+		cbxShowValidationReport.enabled = GCMatterportPersistentTextureSetting "runGLBValidation" "GC.Matterport.RunGLBValidation"
 		return cbxShowValidationReport.checked
 	)
 
@@ -4526,17 +4547,38 @@ fn GCMatterportApplyUpdate runtimeFolder stage updateFiles preparedFolders = (
     return updateResult
 )
 rollout _rSettingsGCMatterportGLBConverter "Settings" category: 998 (
-	group "Textures" (
+	group "GLB validation" (
+		checkbox cbxRunGLBValidation "Run GLB validation on export" checked: true width: 310 align: #center
+	)
+	group "JPEG conversion" (
 		checkbox cbxConvertAllTexturesToJPG "Convert all textures to JPG" checked: true width: 310 align: #center
 		label lblJPEGAlpha "JPG removes alpha. Disable to preserve\nPNG transparency." width: 310 height: 32 align: #center
 	)
+	group "Texture sizes" (
+		checkbox cbxReduceToStandardSizes "Reduce to standard texture sizes" checked: true width: 310 align: #center toolTip: "Round down to 512, 1024, 2048 or 4096. Smaller images are not enlarged. LOD and material size limits always apply. Saved for all scenes."
+		label lblTextureSizeHint "Round down to 512 / 1024 / 2048 / 4096.\nLOD and material limits still apply." width: 310 height: 32 align: #center
+	)
 	fn refreshTextureConversionSetting = (
-		local convertTextures = GCMatterportSceneProperties.getValue "GC.Matterport.ConvertAllTexturesToJPG" true
+		cbxRunGLBValidation.checked = GCMatterportPersistentTextureSetting "runGLBValidation" "GC.Matterport.RunGLBValidation"
+		cbxRunGLBValidation.enabled = (not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
+		local reduceSizes = GCMatterportPersistentTextureSetting "reduceToStandardTextureSizes" "GC.Matterport.ReduceToStandardTextureSizes"
+		cbxReduceToStandardSizes.checked = if (classOf reduceSizes == BooleanClass) then reduceSizes else true
+		cbxReduceToStandardSizes.enabled = (not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
+		local convertTextures = GCMatterportPersistentTextureSetting "convertAllTexturesToJPG" "GC.Matterport.ConvertAllTexturesToJPG"
 		cbxConvertAllTexturesToJPG.checked = if (classOf convertTextures == BooleanClass) then convertTextures else true
 		cbxConvertAllTexturesToJPG.enabled = (not _rExportGCMatterportGLBConverter.isRenderingAO and not _rExportGCMatterportGLBConverter.isExportingLODs)
 		return cbxConvertAllTexturesToJPG.checked
 	)
-	on cbxConvertAllTexturesToJPG changed isChecked do GCMatterportSceneProperties.setValue "GC.Matterport.ConvertAllTexturesToJPG" isChecked
+	on cbxRunGLBValidation changed isChecked do (
+		if (not ('*'.add "runGLBValidation" isChecked)) do messageBox "Could not save the validation setting." title: "Settings" beep: false
+		_rExportGCMatterportGLBConverter.refreshValidationReportSetting()
+	)
+	on cbxConvertAllTexturesToJPG changed isChecked do (
+		if (not ('*'.add "convertAllTexturesToJPG" isChecked)) do messageBox "Could not save the JPG setting." title: "Settings" beep: false
+	)
+	on cbxReduceToStandardSizes changed isChecked do (
+		if (not ('*'.add "reduceToStandardTextureSizes" isChecked)) do messageBox "Could not save the texture size setting." title: "Settings" beep: false
+	)
 	on _rSettingsGCMatterportGLBConverter open do refreshTextureConversionSetting()
 	timer tmrTextureSettings interval: 500 active: true
 	on tmrTextureSettings tick do refreshTextureConversionSetting()
