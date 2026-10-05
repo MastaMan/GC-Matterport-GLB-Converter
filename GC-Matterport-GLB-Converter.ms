@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.5
+VERSION = 1.4.6
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,14 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.6]
+* Added: Convert all textures to JPG before GLTFPack, including normal maps; enabled by default with a visible alpha warning. =
+* Added: Optional downward normalization to standard texture sizes, with actual resize warnings and existing LOD/material caps preserved. =
+* Added: Square-texture preflight rejects affected LODs while valid LODs can continue; existing batch-wide blockers remain. =
+* Added: Colored Batch Export Report with per-LOD outcomes, scrolling and Copy Report; Open this folder confirmation remains. =
+* Changed: Grouped Settings persist across scenes in the user configuration, with migration of existing texture preferences. =
+* Added: Run GLB validation on export can skip automatic validation and reports; manual validation remains available. =
 
 [1.4.5]
 * Fixed: Google Model Viewer uses Custom Studio HDR, Neutral tone mapping and exposure 1.1. =
