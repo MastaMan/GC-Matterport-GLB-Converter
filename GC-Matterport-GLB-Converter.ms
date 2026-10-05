@@ -1,7 +1,7 @@
 /*  
 [INFO] 
 NAME = GC Matterport GLB Converter
-VERSION = 1.4.4
+VERSION = 1.4.5
 AUTHOR = Lukianenko Vasyl
 DEV = https://3dground.net
 HELP = 
@@ -10,6 +10,10 @@ CLIENT=Eugen Zharnikov
 [ABOUT]
 Script for proper conversion model to GLB=
 
+
+[1.4.5]
+* Fixed: Google Model Viewer uses Custom Studio HDR, Neutral tone mapping and exposure 1.1. =
+* Improved: Different Material ID sets across LODs produce a warning instead of blocking export. =
 
 [1.4.4]
 * Improved: AO render summaries label disabled materials as AO Disabled on a separate line. =
