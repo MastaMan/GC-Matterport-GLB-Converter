@@ -1453,6 +1453,7 @@ fn GCMatterportExportPreflight layerNames = (
 	for folderPath in #(maxFilePath, GCMatterportRuntimeFolder) do (
 		for forbiddenPart in #("%", ";", "\r", "\n") where (findString folderPath forbiddenPart != undefined) do append issues "The WebGL batch pipeline requires scene/script paths without %, semicolons or line breaks."
 	)
+	local preflightWarnings = #()
 	local referenceIDs = undefined
 	local referenceLayer = ""
 	local outputNames = #()
@@ -1504,7 +1505,7 @@ fn GCMatterportExportPreflight layerNames = (
 					if (referenceIDs == undefined) then (
 						referenceIDs = materialIDs
 						referenceLayer = layerName
-					) else if ((materialIDs as string) != (referenceIDs as string)) do append issues (entryCaption + ": the slot count and actual Material ID set must match " + referenceLayer + " " + (referenceIDs as string) + "; found " + (materialIDs as string) + ". Match the selected LOD materials before exporting.")
+					) else if ((materialIDs as string) != (referenceIDs as string)) do append preflightWarnings (entryCaption + ": Material IDs differ from " + referenceLayer + " " + (referenceIDs as string) + "; found " + (materialIDs as string) + ". Export is allowed; each LOD uses its own materials.")
 				)
 				if (validSlots) do (
 					exportMaterial = GCMatterportBuildExportMaterial sceneNode
@@ -1546,7 +1547,7 @@ fn GCMatterportExportPreflight layerNames = (
 			append exportJobs (GCMatterportExportJob layerName: layerName nodeRef: sceneNode fileName: fileName textureLimit: limitPixels exportMaterial: exportMaterial textureSizes: textureSizes)
 		)
 	)
-	return #(exportJobs, issues)
+	return #(exportJobs, issues, preflightWarnings)
 )
 
 fn GCMatterportValidateGLB filePath reportFolder = (
@@ -3566,6 +3567,7 @@ rollout _rExportGCMatterportGLBConverter "Exporter" category: 2 (
 		if (completedCount > 0) do summaryText += "\n\nOutput: " + exportFolder
 		for reportLine in reportLines do summaryText += "\n" + reportLine
 		for exportJob in exportJobs where (exportJob.validationSummary != undefined) do summaryText += "\n" + exportJob.fileName + ": " + exportJob.validationSummary
+		for warningLine in preflightResult[3] do summaryText += "\nWarning: " + warningLine
 		try (
 			(dotNetClass "System.IO.File").WriteAllText (validationFolder + "batch-summary.txt") summaryText (dotNetObject "System.Text.UTF8Encoding" false)
 			GCMatterportRunAOProcess (GCMatterportRuntimeFolder + "GC-GLB-Validation.exe") ("report \"" + (trimRight validationFolder "\\") + "\"") GCMatterportRuntimeFolder operationLabel: "Validation report"
